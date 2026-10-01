@@ -1,0 +1,70 @@
+COMO GERAR UMA VERSÃO NOVA DO DARKBOT (darkbot.exe)
+====================================================
+
+O resultado é UM arquivo só: dist\darkbot.exe (~60 MB). É ele que você manda para outra pessoa.
+Nenhuma chave sua vai dentro dele (o build confere isso e cancela se achar alguma).
+
+
+1) PRIMEIRA VEZ NESTE PC (só uma vez)
+-------------------------------------
+Precisa de: Windows 10/11, Python 3.12 ou mais novo, Git e Google Chrome.
+
+Abra o terminal na pasta do projeto e rode:
+
+    python -m venv .venv
+    .venv\Scripts\pip install -r requirements.txt
+    .venv\Scripts\pip install pyinstaller pillow
+
+
+2) (OPCIONAL) MUDAR O NÚMERO DA VERSÃO
+--------------------------------------
+Abra app\config.py e troque a linha:
+
+    VERSION = "0.1.0"
+
+por exemplo para "0.2.0". Não é obrigatório: mesmo sem trocar, cada build novo vira uma versão
+diferente por dentro (o .exe novo substitui o antigo sozinho no PC de quem recebe).
+
+
+3) GERAR O .EXE
+---------------
+Com o darkbot FECHADO, na pasta do projeto:
+
+    .venv\Scripts\python tools\build_exe.py
+
+Leva uns 2 a 3 minutos. No final aparece algo como:
+
+    ok: sem chaves, Playwright e interface presentes
+    pronto: ...\dist\darkbot.exe  (62 MB, versão 0.1.0-c450ca73)
+
+O arquivo fica em:  dist\darkbot.exe
+
+
+4) MANDAR PARA ALGUÉM
+---------------------
+- Zipe o dist\darkbot.exe (WhatsApp, Gmail e Drive costumam bloquear .exe solto).
+- NÃO mande a pasta %LOCALAPPDATA%\darkbot: ela tem as suas chaves e as sessões logadas dos seus perfis.
+- O .exe vai "zerado": sem perfis, sem pesquisas, sem chaves.
+
+Texto para mandar junto:
+
+    Segue o darkbot. É só abrir o darkbot.exe. Na primeira vez ele leva uns 3 segundos se preparando;
+    depois abre direto.
+    Precisa de Windows 10 ou 11 e do Google Chrome instalado.
+    Antes de usar, vá em Configurações e coloque:
+      1. a chave da API do YouTube (grátis: Google Cloud Console > YouTube Data API v3 > Credenciais);
+      2. a chave do Claude (console.anthropic.com) OU do ChatGPT (platform.openai.com) e escolha qual IA usar.
+    Depois vá em Perfis > Adicionar perfil.
+    Se o Windows mostrar "O Windows protegeu o computador": clique em "Mais informações" > "Executar assim mesmo".
+
+
+5) SE DER ERRO
+--------------
+- "ERRO: chave encontrada dentro do pacote": algum arquivo do app tem uma chave escrita. Tire a chave
+  do código (as chaves ficam só na aba Configurações do app) e rode de novo.
+- "csc.exe não encontrado": o Windows precisa do .NET Framework 4 (vem com o Windows 10/11).
+- Erro de permissão ao gerar: feche o darkbot (e qualquer darkbot.exe aberto) e rode de novo.
+- O app do colega não abre: peça o arquivo  %LOCALAPPDATA%\darkbot\darkbot.log  (é o registro de erros).
+
+
+Como funciona por dentro (para quem for mexer): veja docs\CONTEXTO.md, seção 9, item ".exe para distribuir".

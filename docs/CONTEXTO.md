@@ -46,14 +46,15 @@ Palavras e ideias do próprio usuário, organizadas:
 | **Scraping lê o JSON interno do YouTube** (`ytInitialData` + respostas `/youtubei/v1/browse`), não o HTML | O HTML muda o tempo todo; o JSON é bem mais estável. |
 | **O scraping descobre os vídeos, a API oficial dá os números** | A YouTube Data API custa 1 unidade de cota a cada 50 vídeos (quase de graça). Já a busca custa 100 unidades, por isso a descoberta é feita pelo scraping. |
 | **SQLite local agora, Supabase depois** | Poucas pessoas vão usar, com login. Todo acesso ao banco passa por `app/db.py`, para facilitar a troca. |
-| **Config hardcoded em `app/config.py`** | Pedido explícito do usuário: "tudo hardcoded, sem .env". |
-| **Auto-update do exe por último** | Pedido explícito. Primeiro o básico funcionando. |
+| **Parâmetros fixos em `app/config.py`, chaves na aba Configurações** | No começo o usuário pediu "tudo hardcoded, sem .env". Depois pediu para as chaves irem para a aba Configurações (salvas no banco local), o que também é o certo para o .exe. Sem .env até hoje. |
+| **Claude OU ChatGPT** | Pedido do usuário: escolha do provedor em Configurações. Cache de análises vale para os dois. |
+| **.exe = lançador C# + app onedir** | "Não pode demorar pra abrir, um exe só". Ver o item ".exe para distribuir" na seção 9. Auto-update ainda não existe. |
 | **Visual: estilo "soft/clean", paleta Rocketseat** | Ver seção 4. |
 | **Sem shorts** | Pedido explícito do usuário: "não pode trazer shorts". O scraper ignora a prateleira de shorts, e `analytics.videos()` filtra `is_short = 0` (todas as telas leem daí). Vídeo com até 180s pela API também conta como short. |
 
 ### Pontos em aberto já discutidos (sem decisão final)
 
-- **Chaves no GitHub (resolvido em 30/09/2026):** as chaves ficam em `app/secrets.py`, ignorado pelo git e também hardcoded. O `config.py` importa de lá; se o arquivo não existir, as chaves ficam vazias. Numa máquina nova, crie o `app/secrets.py` com `YOUTUBE_API_KEY` e `ANTHROPIC_API_KEY`.
+- **Chaves (resolvido em 30/09/2026):** ficam na aba **Configurações** (tabela `settings` do banco local), nunca no código nem no .exe. O `app/secrets.py` antigo (ignorado pelo git) só serve para a migração automática na primeira abertura. Para levar as chaves a outro PC, o usuário usa o `MINHAS_CHAVES.txt` (na raiz, ignorado pelo git) e cola em Configurações.
 - **Token do auto-update:** qualquer token embutido no exe pode ser extraído. Duas opções foram recomendadas: (a) código num repo privado e os executáveis num repo **público** só de releases, sem token; ou (b) token *fine-grained* **somente leitura** de um único repo. As chaves do YouTube e do Claude também não deveriam ficar dentro do exe distribuído: com o Supabase, elas passam a ficar no banco, protegidas por RLS e liberadas só depois do login.
 
 ## 4. Gosto visual do usuário (importante)
@@ -65,19 +66,27 @@ Palavras e ideias do próprio usuário, organizadas:
 - **Linguagem simples em tudo** (pedido do usuário: "para pessoas com QI menor entenderem"). Nada de termo técnico na tela. Vocabulário fixo: multiplicador → **"Viralizou"** (antes "Bombou"; o usuário pediu "viralizou e assim sucessivamente") (10× = 10 vezes mais views que inscritos); oportunidade → **"Nota"** / "nota para copiar"; outlier → "os que mais bombaram"; mediano → "normalmente"; saturação → **"Concorrência"**; relevância 3/2/1 → **"Mesmo formato" / "Mesmo assunto" / "Parecido"**; potencial → **"Só os bons" / "Mostrar todos"**; selo IA → "Feito com IA"; idade → "Postado há"; crescendo → "Ganhou por dia"; visto → "Apareceu". Todo título, coluna, indicador e marcação pequena tem `title` explicando em uma frase (ex.: "Idioma do vídeo: Espanhol", "Canal criado há 2 meses"). Explicações longas ficam em `TIP` no app.js; os nomes dos idiomas em `LANG_NAME`; os tipos de canal em `FORMAT_TIP`.
 - Depois de qualquer mudança visual, **confira com um screenshot**: Playwright abrindo `http://127.0.0.1:<porta>/` com o servidor rodando no modo demo.
 
-## 5. O que já existe (estado em 30/09/2026)
+## 5. O que já existe (estado em 01/10/2026; os detalhes de cada recurso estão na seção 9)
 
 Repositório: https://github.com/bruno-sisplan/darkbot (branch `main`).
 
 ### Estrutura
 
 ```
-main.py                 entrada: sobe a API local e abre a janela (--browser, --demo, --port=N)
+main.py                 entrada: sobe a API local e abre a janela (--browser, --demo, --port=N, --serve)
 darkbot.bat             abre o app com o banco real (dois cliques)
 darkbot-demo.bat        abre o app com o banco de demonstração
-requirements.txt        fastapi, uvicorn, httpx, playwright, pywebview
+requirements.txt        fastapi, uvicorn, httpx, playwright, pywebview, anthropic, openai
+COMO_GERAR_VERSAO.txt   passo a passo para gerar o darkbot.exe
+MINHAS_CHAVES.txt       chaves do usuário para levar a outro PC (IGNORADO pelo git; nunca commitar)
 app/
-  config.py             chaves e parâmetros fixos (VERSION, YOUTUBE_API_KEY, ANTHROPIC_API_KEY, scrolls, cache, etc.)
+  config.py             parâmetros fixos (VERSION, modelos e preços de IA, potencial, scrolls, cache...)
+  ai.py                 IA (Claude ou ChatGPT): cache, custo, nicho, juiz de relevância, classificação de canais,
+                        tradução, buscas por idioma, perfil do vídeo, relatório, análise de vídeo, variações
+  ai_label.py           selo "gerado por IA" do YouTube (lê a página do vídeo)
+  research.py           pesquisa de mercado (descoberta em camadas, período, comentários, relatório)
+  malandro.py           Método Malandro (em que línguas ninguém fez o vídeo)
+  youtube_web.py        páginas públicas do YouTube sem navegador (sugeridos, busca)
   paths.py              pastas de dados (%LOCALAPPDATA%\darkbot, ou DARKBOT_HOME) e da interface (compatível com PyInstaller)
   db.py                 SQLite: schema, helpers rows/row/tx, settings
   chrome_profiles.py    lista, importa (copia), abre para login, fecha o Chrome, detecta perfil em uso
@@ -89,6 +98,7 @@ app/
   server.py             rotas FastAPI (/api/...) + arquivos da interface
   ui/index.html, style.css, app.js    interface (JS puro, sem build)
 tools/seed_demo.py      gera o banco de DEMONSTRAÇÃO
+tools/build_exe.py      gera dist/darkbot.exe (lançador tools/launcher.cs + ícone tools/darkbot.ico)
 docs/CONTEXTO.md        este arquivo
 ```
 
@@ -135,7 +145,7 @@ docs/CONTEXTO.md        este arquivo
 - **Google Chrome** instalado
 - **Git**
 - Chave da **YouTube Data API v3**: Google Cloud Console → criar projeto → ativar "YouTube Data API v3" → Credenciais → Chave de API. É grátis, com 10.000 unidades por dia.
-- Para a próxima fase: chave da **API da Anthropic** (console.anthropic.com). É cobrada à parte. Os créditos de "sessões na nuvem" do Claude Code **não** servem para isso.
+- Chave da **Anthropic** (console.anthropic.com) **ou** da **OpenAI** (platform.openai.com) para a IA. São cobradas à parte (os créditos do Claude Code **não** servem). Todas as chaves são colocadas na aba **Configurações** do app.
 
 ### Instalação
 
@@ -157,11 +167,11 @@ Não precisa rodar `playwright install`: o app usa o Chrome já instalado.
 
 Dica: se precisar imprimir texto com emoji no terminal do Windows, use `PYTHONIOENCODING=utf-8`.
 
-## 7. Como testar (o teste real que ainda FALTA)
+## 7. Como testar
 
-Tudo foi testado com dados de demonstração e com um perfil deslogado. **O teste com um perfil real e treinado ainda não foi feito.** É o mais importante:
+O teste real foi feito em 30/09/2026 com o perfil "Tecnologia": a cópia do Chrome chegou **deslogada** (os cookies não sobreviveram à cópia), o usuário logou pelo "Entrar na conta" e a coleta funcionou. Perfil **deslogado com histórico** também funciona (ver seção 9). Para conferir de novo:
 
-1. Coloque a chave do YouTube em `YOUTUBE_API_KEY` no `app/secrets.py` (fora do git), ou salve pela tela Configurações.
+1. Coloque as chaves em **Configurações** (YouTube + Claude ou ChatGPT).
 2. Abra com `darkbot.bat` (banco real, não o de demo).
 3. **Perfis → Adicionar perfil → Importar do Chrome.** Escolha um perfil já treinado num nicho. Se o Chrome estiver aberto, use "Fechar o Chrome".
 4. **Coletar agora.** Na primeira vez, marque "ver navegador" para acompanhar.
@@ -180,12 +190,14 @@ Tudo foi testado com dados de demonstração e com um perfil deslogado. **O test
 - **O Chrome 136+ bloqueia automação na pasta padrão de perfis.** Por isso o app sempre copia o perfil para a pasta própria dele.
 - **O Google bloqueia login em navegador automatizado.** Por isso "Abrir p/ login" abre o Chrome normal (subprocess), sem Playwright.
 - **Headless é detectado pelo YouTube.** Por isso a janela real fica fora da tela.
-- **Não testado:** coleta completa numa home real logada, importação de perfil com sucesso, enriquecimento com uma chave real e o "crescimento" com coletas reais em dias diferentes.
+- **Ainda não testado:** o "crescimento" (views/dia entre coletas) com coletas reais em dias diferentes, e o .exe num PC de outra pessoa (só simulado aqui com pasta de dados limpa).
 - `titles.py` usa lista de stopwords em PT, EN e ES. O corte de outlier é por percentil ou multiplicador mínimo.
 
 ## 9. Onde paramos e próximos passos (em ordem)
 
-**Última coisa feita:** ambiente montado na segunda máquina (venv com Python 3.13, demo gerada, app conferido por screenshot), chaves movidas para `app/secrets.py` (fora do git), **shorts removidos de tudo** importação sem precisar fechar o Chrome (só o perfil escolhido não pode estar aberto) e correção do `darkbot.bat`: com `pythonw` o stdout é None, o log do uvicorn quebrava e o app fechava em silêncio. Agora, sem console, a saída vai para `%LOCALAPPDATA%\darkbot\darkbot.log`.
+**Última coisa feita (01/10/2026):** .exe gerado e testado (`tools/build_exe.py`, ver o item ".exe para distribuir"), perfil deslogado testado, tudo commitado (`34b72d3`), `COMO_GERAR_VERSAO.txt` criado e `MINHAS_CHAVES.txt` (ignorado pelo git) para o usuário levar as chaves a outro PC. Os itens abaixo estão em ordem cronológica: cada bloco em negrito é um recurso, com o porquê e os detalhes técnicos.
+
+**Primeiros ajustes (30/09/2026):** ambiente montado na segunda máquina (venv com Python 3.13, demo gerada), **shorts removidos de tudo**, importação sem precisar fechar o Chrome (só o perfil escolhido não pode estar aberto) e correção do `darkbot.bat`: com `pythonw` o stdout é None, o log do uvicorn quebrava e o app fechava em silêncio. Agora, sem console, a saída vai para `%LOCALAPPDATA%\darkbot\darkbot.log`.
 
 **IA (Claude), primeira parte feita em 30/09/2026:**
 - `app/ai.py`: cliente, tabela `ai_results` (uma análise por tipo + alvo, **nunca reprocessa**, só com `refresh=True`), custo em US$ de cada chamada e total mostrado em Configurações. A chave fica em `ANTHROPIC_API_KEY` no `app/secrets.py`. O usuário tem US$ 5 de crédito: economia máxima, mas "sem burrice".
@@ -278,26 +290,23 @@ Tudo foi testado com dados de demonstração e com um perfil deslogado. **O test
 **Perfil deslogado (01/10/2026):** o usuário quer poder usar perfis SEM conta do YouTube. Testado: perfil novo e deslogado = home vazia (0 vídeos); depois de assistir 6 vídeos do nicho (35s cada) = 93 vídeos na home, quase todos no nicho (algum ruído regional). O YouTube recomenda pelo histórico em cookie. Cuidados: treinar DENTRO do perfil do darkbot ("Criar e logar" sem logar + "Treinar o perfil"), porque a cópia de perfil do Chrome pode perder os cookies; "Coletar o que assistiu" exige login; limpar cookies zera o perfil. Pesquisa IA, Malandro, variações, busca e sugeridos não dependem de login (sempre como visitante). A mensagem de home vazia agora sugere logar OU treinar.
 
 **Pendente com o usuário:**
-- Rodar o teste real da seção 7.
+- Mandar o .exe para o colega e ver se funciona no PC dele (o `.exe` atual foi gerado ANTES da mensagem nova de "home vazia": gerar de novo antes de mandar).
+- As chaves da OpenAI e da Anthropic apareceram no chat de desenvolvimento: recomendado gerar chaves novas nos painéis.
+- Quando as chaves estiverem em Configurações em todos os PCs, o `app/secrets.py` pode ser apagado.
+- Ideias oferecidas e ainda não pedidas: botão "Exportar pesquisa" (mandar uma pesquisa para outra pessoa sem chaves nem logins); gerador de título e descrição do vídeo (os dados já ficam guardados para isso).
 
-**Roadmap combinado:**
+**Roadmap (o que já foi feito está marcado):**
 
-1. **Teste real + correções** do que aparecer.
-2. **Análise com IA (Claude)**, com economia de tokens como requisito central:
-   - **Números filtram, IA só interpreta.** A IA só vê os outliers, nunca centenas de vídeos.
-   - Enviar para a IA o **resumo pronto do `titles.py`**, não os títulos crus.
-   - **Haiku 4.5** (`claude-haiku-4-5-20251001`) para tarefas em massa (classificar título, extrair gancho); **Sonnet 5.5** (`claude-sonnet-5-5`) só para síntese (relatório do nicho, "o que modelar essa semana").
-   - **Analisar uma vez e guardar no banco.** Nunca repetir análise do mesmo vídeo.
-   - **Prompt caching** das instruções fixas e **Batch API** (metade do preço) nas análises em lote.
-   - Recursos pensados: botão "Analisar" por vídeo (por que furou, estrutura do título, gancho, ideias de vídeo para modelar), relatório semanal por nicho, e sugestões de títulos no padrão dos outliers.
-   - A chave vai em `ANTHROPIC_API_KEY`. Antes de implementar, consultar a referência atual da API da Anthropic (modelos, preços, caching, batch).
-3. **Sugestões dos vídeos:** abrir os principais outliers e raspar a barra lateral ("a seguir"). Pega canais que a home não mostra.
+1. ✅ **Teste real + correções.**
+2. ✅ **Análise com IA**, com economia de tokens: juiz de relevância, classificação de canais, relatório, análise de vídeo com thumbnail, variações de título, Método Malandro, tradução; tudo em cache. Claude OU ChatGPT. Batch API e prompt caching ainda não usados (os prompts são curtos demais para o cache valer).
+3. ✅ **Sugestões dos vídeos:** feito na pesquisa em profundidade (sugeridos em camadas, só pelos relevantes).
 4. **Coleta agendada:** coletar sozinho a cada X horas, para alimentar o "crescimento".
-5. **Transcrições** com yt-dlp (gancho dos primeiros 30s, estrutura de roteiro), já prevista na sidebar como "EM BREVE".
-6. **Seus canais:** cadastrar os canais que já estão rodando e comparar com a concorrência. Mais para frente, a YouTube Analytics API (retenção e CTR reais).
-7. **Supabase:** dados compartilhados entre as pessoas, login por e-mail, chaves no banco protegidas por RLS. Trocar a implementação de `app/db.py`.
-8. **Agentes e skills:** agentes consultando o banco por ferramentas ("me dá os 20 outliers do nicho X"), em vez de receber tudo no prompt.
-9. **POR ÚLTIMO, o .exe com auto-update:** PyInstaller gerando o `darkbot.exe` (`paths.py` já está pronto para o `_MEIPASS`); GitHub Actions compilando e publicando um Release a cada tag `vX.Y.Z`; o app checa o último Release ao abrir, baixa o exe novo, renomeia o atual para `.old` (o Windows não deixa sobrescrever um exe em execução), coloca o novo no lugar e reinicia. Ver a questão do token na seção 3.
+5. **Transcrições** com yt-dlp (gancho dos primeiros 30s, estrutura de roteiro), na sidebar como "EM BREVE".
+6. **Gerador de título, descrição e tags** para o vídeo do usuário, usando pesquisas, comentários, variações e o idioma do canal.
+7. **Seus canais:** cadastrar os canais que já estão rodando e comparar com a concorrência. Mais para frente, a YouTube Analytics API (retenção e CTR reais).
+8. **Supabase:** dados compartilhados entre as pessoas, login por e-mail, chaves no banco protegidas por RLS. Trocar a implementação de `app/db.py`.
+9. **Agentes e skills:** agentes consultando o banco por ferramentas ("me dá os 20 outliers do nicho X"), em vez de receber tudo no prompt.
+10. 🟡 **.exe:** feito (`tools/build_exe.py`). Falta o **auto-update**: GitHub Actions publicando um Release a cada tag `vX.Y.Z`; o lançador checa o último Release ao abrir, baixa e descompacta a versão nova numa pasta nova (o formato atual já separa versões por pasta). Ver a questão do token na seção 3.
 
 ## 10. Como trabalhar com este usuário
 
