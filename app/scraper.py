@@ -8,7 +8,6 @@ Daqui só precisamos dos IDs (e do título como reserva); os números exatos vê
 from pathlib import Path
 from typing import Callable
 
-from playwright.sync_api import sync_playwright
 
 from . import config
 
@@ -17,6 +16,8 @@ _AD_KEYS = {
     "adSlotRenderer", "promotedSparklesWebRenderer", "promotedVideoRenderer",
     "displayAdRenderer", "inFeedAdLayoutRenderer", "statementBannerRenderer",
 }
+# Shorts: o foco é vídeo longo, então a prateleira de shorts é ignorada.
+_SHORTS_KEYS = {"shortsLockupViewModel", "reelItemRenderer", "reelShelfRenderer"}
 
 
 def _text(node) -> str:
@@ -61,13 +62,8 @@ class _Collector:
                         self._add(val.get("contentId"), title, "home")
                     else:
                         continue  # playlists/mixes: não entra
-                elif key == "shortsLockupViewModel" and isinstance(val, dict):
-                    vid = _dig(val, "onTap", "innertubeCommand", "reelWatchEndpoint", "videoId")
-                    if not vid:
-                        vid = (val.get("entityId") or "").replace("shorts-shelf-item-", "")
-                    self._add(vid, _dig(val, "overlayMetadata", "primaryText", "content"), "shorts")
-                elif key == "reelItemRenderer" and isinstance(val, dict):
-                    self._add(val.get("videoId"), _text(val.get("headline")), "shorts")
+                elif key in _SHORTS_KEYS:
+                    continue  # shorts: não entram
                 self.walk(val)
         elif isinstance(node, list):
             for item in node:
@@ -79,10 +75,15 @@ def collect_home(
     scrolls: int = config.DEFAULT_SCROLLS,
     show_browser: bool = False,
     on_progress: Callable[[int, int, int], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    page: str = "home",
 ) -> dict:
     """Abre a home com o perfil, rola `scrolls` vezes e devolve os vídeos que o algoritmo entregou."""
+    from playwright.sync_api import sync_playwright  # só aqui: o Playwright pesa para carregar
     col = _Collector()
     pending = []
+    # 'home' = página inicial (o que o algoritmo empurra); 'history' = histórico (o que o perfil assistiu)
+    url = "https://www.youtube.com/feed/history" if page == "history" else "https://www.youtube.com/"
 
     args = [
         "--disable-blink-features=AutomationControlled",
@@ -115,13 +116,13 @@ def collect_home(
 
             def drain():
                 while pending:
-                    resp = pending.pop()
+                    resp = pending.pop(0)
                     try:
                         col.walk(resp.json())
                     except Exception:
                         pass
 
-            page.goto("https://www.youtube.com/", wait_until="domcontentloaded", timeout=60_000)
+            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_timeout(3000)
             initial = page.evaluate("() => window.ytInitialData || null")
             if initial:
@@ -130,6 +131,8 @@ def collect_home(
 
             stale = 0
             for i in range(scrolls):
+                if should_stop and should_stop():  # cancelado: fica com o que já rolou
+                    break
                 before = len(col.found)
                 page.mouse.wheel(0, 6000)
                 page.wait_for_timeout(config.SCROLL_WAIT_MS)

@@ -1,5 +1,6 @@
 """YouTube Data API v3: números exatos dos vídeos e canais. Custa 1 unidade de cota a cada 50 itens."""
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
@@ -47,57 +48,104 @@ def _int(v):
     return int(v) if v is not None else None
 
 
+API_WORKERS = 4  # lotes de 50 em paralelo (a cota é a mesma; só fica mais rápido)
+
+
+def _fetch_items(path: str, part: str, ids, key: str) -> list[dict]:
+    def one(chunk):
+        with httpx.Client(timeout=30) as client:
+            return _get(client, path, {"part": part, "id": ",".join(chunk), "key": key, "maxResults": 50}).get("items", [])
+
+    chunks = list(_chunks(ids))
+    if len(chunks) <= 1:
+        return [it for c in chunks for it in one(c)]
+    with ThreadPoolExecutor(API_WORKERS) as pool:
+        return [it for items in pool.map(one, chunks) for it in items]
+
+
 def fetch_videos(ids, key: str) -> list[dict]:
     out = []
-    with httpx.Client(timeout=30) as client:
-        for chunk in _chunks(ids):
-            data = _get(client, "videos", {
-                "part": "snippet,statistics,contentDetails",
-                "id": ",".join(chunk),
-                "key": key,
-                "maxResults": 50,
-            })
-            for it in data.get("items", []):
-                sn, st = it.get("snippet", {}), it.get("statistics", {})
-                out.append({
-                    "video_id": it["id"],
-                    "title": sn.get("title"),
-                    "channel_id": sn.get("channelId"),
-                    "channel_title": sn.get("channelTitle"),
-                    "published_at": sn.get("publishedAt"),
-                    "lang": sn.get("defaultAudioLanguage") or sn.get("defaultLanguage"),
-                    "duration_s": parse_duration(it.get("contentDetails", {}).get("duration")),
-                    "views": _int(st.get("viewCount")),
-                    "likes": _int(st.get("likeCount")),
-                    "comments": _int(st.get("commentCount")),
-                })
+    for it in _fetch_items("videos", "snippet,statistics,contentDetails", ids, key):
+        sn, st = it.get("snippet", {}), it.get("statistics", {})
+        out.append({
+            "video_id": it["id"],
+            "title": sn.get("title"),
+            "channel_id": sn.get("channelId"),
+            "channel_title": sn.get("channelTitle"),
+            "published_at": sn.get("publishedAt"),
+            "lang": sn.get("defaultAudioLanguage") or sn.get("defaultLanguage"),
+            "duration_s": parse_duration(it.get("contentDetails", {}).get("duration")),
+            "views": _int(st.get("viewCount")),
+            "likes": _int(st.get("likeCount")),
+            "comments": _int(st.get("commentCount")),
+            "description": (sn.get("description") or "")[:2000],
+            "tags": sn.get("tags") or [],
+        })
     return out
 
 
 def fetch_channels(ids, key: str) -> list[dict]:
     out = []
+    for it in _fetch_items("channels", "snippet,statistics", ids, key):
+        sn, st = it.get("snippet", {}), it.get("statistics", {})
+        thumbs = sn.get("thumbnails", {})
+        out.append({
+            "channel_id": it["id"],
+            "title": sn.get("title"),
+            "handle": sn.get("customUrl"),
+            "published_at": sn.get("publishedAt"),
+            "country": sn.get("country"),
+            "thumbnail": (thumbs.get("default") or {}).get("url"),
+            "subs": None if st.get("hiddenSubscriberCount") else _int(st.get("subscriberCount")),
+            "video_count": _int(st.get("videoCount")),
+            "total_views": _int(st.get("viewCount")),
+            "description": (sn.get("description") or "")[:600],
+        })
+    return out
+
+
+def fetch_uploads(channel_id: str, key: str, limit: int = 20) -> list[tuple[str, str]]:
+    """Últimos vídeos enviados pelo canal (1 unidade de cota): [(id, título)], do mais novo ao mais antigo."""
+    if not channel_id or not channel_id.startswith("UC"):
+        return []
     with httpx.Client(timeout=30) as client:
-        for chunk in _chunks(ids):
-            data = _get(client, "channels", {
-                "part": "snippet,statistics",
-                "id": ",".join(chunk),
-                "key": key,
-                "maxResults": 50,
+        try:
+            data = _get(client, "playlistItems", {"part": "snippet", "playlistId": "UU" + channel_id[2:],
+                                                  "maxResults": min(limit, 50), "key": key})
+        except YouTubeAPIError as e:
+            if "Cota" in str(e) or "inválida" in str(e):
+                raise
+            return []
+    out = []
+    for it in data.get("items", []):
+        sn = it.get("snippet", {})
+        vid = (sn.get("resourceId") or {}).get("videoId")
+        if vid:
+            out.append((vid, sn.get("title") or ""))
+    return out
+
+
+def fetch_comments(video_id: str, key: str, limit: int = 100) -> list[dict]:
+    """Comentários mais relevantes (1 unidade de cota por página de 100). Vídeo sem comentários -> []."""
+    with httpx.Client(timeout=30) as client:
+        try:
+            data = _get(client, "commentThreads", {
+                "part": "snippet", "videoId": video_id, "key": key, "order": "relevance",
+                "textFormat": "plainText", "maxResults": min(limit, 100),
             })
-            for it in data.get("items", []):
-                sn, st = it.get("snippet", {}), it.get("statistics", {})
-                thumbs = sn.get("thumbnails", {})
-                out.append({
-                    "channel_id": it["id"],
-                    "title": sn.get("title"),
-                    "handle": sn.get("customUrl"),
-                    "published_at": sn.get("publishedAt"),
-                    "country": sn.get("country"),
-                    "thumbnail": (thumbs.get("default") or {}).get("url"),
-                    "subs": None if st.get("hiddenSubscriberCount") else _int(st.get("subscriberCount")),
-                    "video_count": _int(st.get("videoCount")),
-                    "total_views": _int(st.get("viewCount")),
-                })
+        except YouTubeAPIError as e:
+            if "Cota" in str(e) or "inválida" in str(e):
+                raise
+            return []  # comentários desativados, vídeo privado etc.
+    out = []
+    for it in data.get("items", []):
+        top = it["snippet"]["topLevelComment"]
+        sn = top["snippet"]
+        out.append({
+            "comment_id": top["id"], "video_id": video_id, "text": sn.get("textDisplay") or "",
+            "likes": _int(sn.get("likeCount")), "replies": _int(it["snippet"].get("totalReplyCount")),
+            "published_at": sn.get("publishedAt"),
+        })
     return out
 
 

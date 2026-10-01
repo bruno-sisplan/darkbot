@@ -6,7 +6,9 @@ logada daquela conta para uma pasta própria do darkbot, que o scraper usa sem m
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
+import tempfile
 from pathlib import Path
 
 # Pastas de cache que não precisam ser copiadas (deixam a importação lenta e pesada).
@@ -47,34 +49,61 @@ def list_chrome_profiles() -> list[dict]:
                 "folder": folder,
                 "name": info.get("name") or folder,
                 "email": info.get("user_name") or "",
+                "open": chrome_profile_open(folder),
             })
     return sorted(out, key=lambda p: p["folder"])
 
 
-def chrome_running() -> bool:
+def chrome_profile_open(chrome_folder: str) -> bool:
+    """O Chrome só trava os cookies do perfil que está aberto; os outros dá para copiar com ele rodando."""
+    src = chrome_user_data() / chrome_folder
+    for cookies in (src / "Network" / "Cookies", src / "Cookies"):
+        if cookies.is_file():
+            try:
+                with open(cookies, "rb"):
+                    return False
+            except PermissionError:
+                return True
+    return False
+
+
+def youtube_history_titles(chrome_folder: str, limit: int = 200) -> list[str]:
+    """Títulos dos vídeos do YouTube no histórico local do perfil (mais recentes primeiro).
+
+    Só enxerga o que foi aberto neste PC, então pode vir pouco. Lê uma cópia para não brigar com o Chrome.
+    """
+    src = chrome_user_data() / chrome_folder / "History"
+    if not src.is_file():
+        return []
+    fd, tmp = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
     try:
-        res = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH"],
-            capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        return "chrome.exe" in res.stdout.lower()
-    except OSError:
-        return False
+        shutil.copy2(src, tmp)
+        con = sqlite3.connect(tmp)
+        try:
+            rows = con.execute(
+                "SELECT title FROM urls WHERE url LIKE 'https://www.youtube.com/watch%' AND title <> '' "
+                "ORDER BY last_visit_time DESC LIMIT ?", (limit * 2,)
+            ).fetchall()
+        finally:
+            con.close()
+    except (OSError, sqlite3.Error):
+        return []
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    out, seen = [], set()
+    for (title,) in rows:
+        title = title.removesuffix(" - YouTube").strip()
+        if title and title not in seen:
+            seen.add(title)
+            out.append(title)
+    return out[:limit]
 
 
-def close_chrome(timeout: float = 8) -> bool:
-    """Fecha o Chrome (primeiro educadamente; se não fechar, força). Ele restaura as abas ao reabrir."""
-    import time
-    flags = subprocess.CREATE_NO_WINDOW
-    subprocess.run(["taskkill", "/IM", "chrome.exe"], capture_output=True, creationflags=flags)
-    end = time.time() + timeout
-    while time.time() < end:
-        if not chrome_running():
-            return True
-        time.sleep(0.4)
-    subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True, creationflags=flags)
-    time.sleep(1)
-    return not chrome_running()
+_OPEN_MSG = "Esse perfil está aberto no Chrome. Feche as janelas dele (os outros perfis podem continuar abertos) e tente de novo."
 
 
 def import_profile(chrome_folder: str, dest: Path) -> None:
@@ -83,8 +112,8 @@ def import_profile(chrome_folder: str, dest: Path) -> None:
     src = ud / chrome_folder
     if not src.is_dir():
         raise ValueError(f"Perfil do Chrome não encontrado: {chrome_folder}")
-    if chrome_running():
-        raise RuntimeError("Feche o Google Chrome (todas as janelas) antes de importar o perfil.")
+    if chrome_profile_open(chrome_folder):
+        raise RuntimeError(_OPEN_MSG)
 
     dest.mkdir(parents=True, exist_ok=True)
     # O 'Local State' guarda a chave que descriptografa os cookies (a sessão logada).
@@ -94,7 +123,7 @@ def import_profile(chrome_folder: str, dest: Path) -> None:
     except shutil.Error as e:
         failed = [str(err[0]) for err in e.args[0]]
         if any("Cookies" in f for f in failed):
-            raise RuntimeError("Não consegui copiar os cookies (Chrome ainda aberto?). Feche o Chrome e tente de novo.")
+            raise RuntimeError(_OPEN_MSG)
 
 
 def profile_in_use(profile_dir: Path) -> bool:
@@ -111,7 +140,7 @@ def profile_in_use(profile_dir: Path) -> bool:
         return False
 
 
-def open_for_login(profile_dir: Path) -> None:
+def open_for_login(profile_dir: Path, url: str = "https://www.youtube.com/") -> None:
     """Abre um Chrome normal (sem automação) nesse perfil, para logar na conta ou treinar o algoritmo."""
     chrome = find_chrome()
     if not chrome:
@@ -122,5 +151,5 @@ def open_for_login(profile_dir: Path) -> None:
         f"--user-data-dir={profile_dir}",
         "--no-first-run",
         "--no-default-browser-check",
-        "https://www.youtube.com/",
+        url,
     ])

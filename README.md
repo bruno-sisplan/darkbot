@@ -15,4 +15,13 @@ python -m venv .venv
 - `darkbot-demo.bat`: abre com dados de demonstração (gerados por `.venv\Scripts\python tools\seed_demo.py`)
 - `python main.py --browser`: abre no navegador em vez da janela
 
-Chaves e parâmetros ficam em `app/config.py`. Os dados ficam em `%LOCALAPPDATA%\darkbot`.
+As chaves (YouTube, Anthropic, OpenAI) são colocadas na aba **Configurações** do app. Os dados ficam em `%LOCALAPPDATA%\darkbot`.
+
+## Gerar o .exe
+
+```
+.venv\Scripts\pip install pyinstaller pillow
+.venv\Scripts\python toolsuild_exe.py
+```
+
+Sai em `dist\darkbot.exe` (um arquivo só, ~60 MB). Na primeira vez que abre, ele se prepara em `%LOCALAPPDATA%\darkbotpp\<versão>` (2 a 3 s); depois abre em ~1,5 s. Nenhuma chave vai dentro do .exe (o build confere). Quem recebe precisa de Windows 10/11 64 bits e do Google Chrome.

@@ -39,27 +39,23 @@ def _content(tokens: list[str]) -> list[str]:
 _FEATURES = [
     ("number", "Tem número", lambda t: bool(re.search(r"\d", t))),
     ("starts_number", "Começa com número", lambda t: bool(re.match(r"\s*\d", t))),
-    ("question", "Pergunta (?)", lambda t: "?" in t),
-    ("exclaim", "Exclamação (!)", lambda t: "!" in t),
-    ("caps", "Palavra em CAPS", lambda t: bool(re.search(r"\b[A-ZÀ-Ý]{3,}\b", t))),
-    ("emoji", "Emoji", lambda t: bool(_EMOJI.search(t))),
-    ("separator", "Separador ( : | - )", lambda t: bool(re.search(r"[:|]| - | – ", t))),
-    ("brackets", "Parênteses/colchetes", lambda t: bool(re.search(r"[\(\[]", t))),
-    ("hashtag", "Hashtag", lambda t: "#" in t),
-    ("you", "Fala com o público (você)", lambda t: bool(re.search(r"\b(você|voce|vc|you|tu)\b", t, re.I))),
-    ("superlative", "Superlativo (mais/maior/pior)", lambda t: bool(re.search(r"\b(mais|maior|maiores|pior|piores|melhor|melhores|most|biggest|worst)\b", t, re.I))),
-    ("negative", "Negação/proibido (nunca/ninguém)", lambda t: bool(re.search(r"\b(nunca|ninguém|ninguem|jamais|proibid\w*|never|nobody)\b", t, re.I))),
+    ("question", "Faz uma pergunta (?)", lambda t: "?" in t),
+    ("exclaim", "Tem exclamação (!)", lambda t: "!" in t),
+    ("caps", "Palavra em MAIÚSCULAS", lambda t: bool(re.search(r"\b[A-ZÀ-Ý]{3,}\b", t))),
+    ("emoji", "Tem emoji", lambda t: bool(_EMOJI.search(t))),
+    ("separator", "Tem separador ( : | - )", lambda t: bool(re.search(r"[:|]| - | – ", t))),
+    ("brackets", "Tem parênteses ou colchetes", lambda t: bool(re.search(r"[\(\[]", t))),
+    ("hashtag", "Tem hashtag (#)", lambda t: "#" in t),
+    ("you", "Fala com quem assiste (você)", lambda t: bool(re.search(r"\b(você|voce|vc|you|tu)\b", t, re.I))),
+    ("superlative", "Exagera (mais, maior, pior)", lambda t: bool(re.search(r"\b(mais|maior|maiores|pior|piores|melhor|melhores|most|biggest|worst)\b", t, re.I))),
+    ("negative", "Proibido / nunca / ninguém", lambda t: bool(re.search(r"\b(nunca|ninguém|ninguem|jamais|proibid\w*|never|nobody)\b", t, re.I))),
 ]
 
 
-def _pick(videos: list[dict], vtype: str, max_age: float) -> list[dict]:
+def _pick(videos: list[dict], max_age: float) -> list[dict]:
     out = []
     for v in videos:
         if v["multiplier"] is None or not v["title"]:
-            continue
-        if vtype == "long" and v["is_short"]:
-            continue
-        if vtype == "short" and not v["is_short"]:
             continue
         if max_age and (v["age_days"] is None or v["age_days"] > max_age):
             continue
@@ -108,8 +104,13 @@ def _med(values) -> float | None:
     return round(median(vals), 1) if vals else None
 
 
-def patterns(profile_id: int | None = None, vtype: str = "all", max_age: float = 0, outlier: str = "top20") -> dict:
-    videos = _pick(analytics.videos(profile_id), vtype, max_age)
+def patterns(profile_id: int | None = None, max_age: float = 0, outlier: str = "top20") -> dict:
+    return analyze(_pick(analytics.videos(profile_id), max_age), outlier)
+
+
+def analyze(videos: list[dict], outlier: str = "top20") -> dict:
+    """Padrões de título dos outliers vs. o resto, para qualquer conjunto de vídeos (coleta ou pesquisa)."""
+    videos = [v for v in videos if v["multiplier"] is not None and v["title"]]
     if len(videos) < 6:
         return {"ok": False, "total": len(videos),
                 "reason": "Poucos vídeos com números para comparar. Colete mais (com a chave da API configurada)."}
@@ -173,7 +174,7 @@ def patterns(profile_id: int | None = None, vtype: str = "all", max_age: float =
         ],
         "examples": [
             {"video_id": v["video_id"], "title": v["title"], "multiplier": v["multiplier"],
-             "views": v["views"], "channel_title": v["channel_title"], "is_short": v["is_short"]}
+             "views": v["views"], "channel_title": v["channel_title"]}
             for v in top[:30]
         ],
     }

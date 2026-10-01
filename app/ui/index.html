@@ -18,6 +18,9 @@
       </div>
     </div>
 
+    <!-- Perfil em uso: tudo no app (descobertas, pesquisas, coletas) é desse perfil -->
+    <button class="active-profile" id="active-profile" title="Trocar o perfil em uso"></button>
+
     <nav class="nav">
       <div class="nav-label">Radar</div>
       <button class="nav-item active" data-page="videos">
@@ -34,8 +37,8 @@
       </button>
 
       <div class="nav-label">Mais ferramentas</div>
-      <button class="nav-item soon" disabled>
-        <svg viewBox="0 0 24 24"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>Análise IA<span class="badge-soon">EM BREVE</span>
+      <button class="nav-item" data-page="research">
+        <svg viewBox="0 0 24 24"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>Pesquisa IA
       </button>
       <button class="nav-item soon" disabled>
         <svg viewBox="0 0 24 24"><path d="M7 4h10a2 2 0 0 1 2 2v14l-7-4-7 4V6a2 2 0 0 1 2-2z"/></svg>Transcrições<span class="badge-soon">EM BREVE</span>
@@ -60,45 +63,74 @@
       <header class="page-head">
         <div>
           <h1>Descobertas</h1>
-          <p class="muted">O que o algoritmo está entregando nos seus perfis, ranqueado pelo quanto furou a bolha.</p>
+          <p class="muted">Os vídeos que o YouTube está mostrando neste perfil, do que mais viralizou para o que menos viralizou.</p>
         </div>
         <div class="head-actions">
-          <select id="v-profile" class="select"></select>
-          <button class="btn ghost" id="btn-refresh" title="Atualiza views e inscritos pela API">Atualizar números</button>
+          <select id="v-profile" class="select" hidden></select>
+          <button class="btn ghost" id="btn-runs" title="Ver a lista de coletas, ver só uma delas ou apagar as que deram errado">
+            <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>Coletas</button>
+          <button class="btn ghost" id="btn-refresh" title="Busca de novo as views e os inscritos de todos os vídeos">Atualizar números</button>
         </div>
       </header>
 
-      <div class="filters">
-        <div class="seg" id="v-type">
-          <button data-v="all" class="on">Todos</button>
-          <button data-v="long">Longos</button>
-          <button data-v="short">Shorts</button>
+      <!-- Pesquisa por nicho: vira uma pesquisa de mercado (busca em vários idiomas) -->
+      <div class="niche-bar">
+        <div class="niche-input">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg>
+          <input id="nb-query" placeholder="O que você quer pesquisar? Ex.: histórias de terror, mistérios do oceano… (use vírgula para separar)">
+          <button class="btn primary sm" id="nb-go">Pesquisar</button>
         </div>
-        <label class="field"><span>Publicado</span>
+        <select id="nb-period" class="select sm period-sel" title="Só traz vídeos postados dentro desse tempo">
+            <option value="7">Última semana</option><option value="30" selected>Último mês</option>
+            <option value="90">Últimos 3 meses</option><option value="365">Último ano</option><option value="0">Qualquer data</option>
+          </select>
+        <div class="lang-picker" id="nb-langs" title="Em quais idiomas pesquisar. Pesquisar em outros idiomas mostra o que funciona lá fora para você trazer para o seu canal"></div>
+      </div>
+
+      <div class="filters">
+        <div class="field"><span>Tipo de canal</span>
+          <div class="seg" id="v-ai">
+            <button data-v="all" class="on">Todos</button>
+            <button data-v="dark" title="Só canais dark: canais sem ninguém aparecendo, feitos para rodar sozinhos">Só dark</button>
+            <button data-v="ai" title="Só canais que avisam no YouTube que o vídeo foi feito com IA">Feito com IA</button>
+          </div>
+        </div>
+        <label class="field" title="De onde o vídeo veio"><span>De onde veio</span>
+          <select id="v-source" class="select sm">
+            <option value="">De todo lugar</option><option value="home">Página inicial do perfil</option>
+            <option value="history">Vídeos que o perfil assistiu</option>
+            <option value="research">Pesquisas que você enviou</option>
+          </select>
+        </label>
+        <label class="field" title="Ver só os vídeos de uma coleta"><span>Coleta</span>
+          <select id="v-run" class="select sm"><option value="">Todas</option></select>
+        </label>
+        <label class="field" title="Só vídeos postados dentro desse tempo"><span>Postado há até</span>
           <select id="v-age" class="select sm">
             <option value="0">Qualquer data</option><option value="7">7 dias</option>
             <option value="30" selected>30 dias</option><option value="90">90 dias</option><option value="365">1 ano</option>
           </select>
         </label>
-        <label class="field"><span>Inscritos até</span>
+        <label class="field" title="Só canais pequenos: com até esse número de inscritos"><span>Canal com até</span>
           <select id="v-subs" class="select sm">
-            <option value="0">Qualquer</option><option value="1000">1 mil</option><option value="10000">10 mil</option>
-            <option value="50000">50 mil</option><option value="100000">100 mil</option><option value="500000">500 mil</option>
+            <option value="0">Qualquer tamanho</option><option value="1000">1 mil inscritos</option><option value="10000">10 mil inscritos</option>
+            <option value="50000">50 mil inscritos</option><option value="100000">100 mil inscritos</option><option value="500000">500 mil inscritos</option>
           </select>
         </label>
-        <label class="field"><span>Canal criado há</span>
+        <label class="field" title="Só canais novos: criados dentro desse tempo"><span>Idade do canal</span>
           <select id="v-chage" class="select sm">
-            <option value="0">Qualquer</option><option value="90">até 3 meses</option>
+            <option value="0">Qualquer idade</option><option value="90">até 3 meses</option>
             <option value="180">até 6 meses</option><option value="365">até 1 ano</option>
           </select>
         </label>
-        <label class="field"><span>Multiplicador ≥</span>
+        <label class="field" title="Quantas vezes o vídeo teve mais views do que o canal tem de inscritos. Ex.: 10× = 10 vezes mais views que inscritos. Quanto maior, mais o YouTube espalhou o vídeo."><span>Viralizou pelo menos</span>
           <select id="v-mult" class="select sm">
             <option value="0">Qualquer</option><option value="1">1×</option><option value="3">3×</option>
             <option value="10">10×</option><option value="50">50×</option>
           </select>
         </label>
-        <input id="v-search" class="input search grow" placeholder="Buscar título ou canal…">
+        <input id="v-search" class="input search grow" placeholder="Procurar um título ou canal nesta lista…">
+        <button class="btn ghost sm" id="v-translate" title="Mostra em português os títulos que estão em outros idiomas">Traduzir títulos</button>
       </div>
 
       <div class="kpis" id="v-kpis"></div>
@@ -108,13 +140,14 @@
           <thead><tr>
             <th class="col-thumb"></th>
             <th data-sort="title">Vídeo</th>
-            <th data-sort="multiplier" class="num sorted desc">Multiplicador</th>
-            <th data-sort="views" class="num">Views</th>
-            <th data-sort="views_day" class="num">Views/dia</th>
-            <th data-sort="growth_day" class="num" title="Views/dia entre as duas últimas coletas">Crescendo</th>
-            <th data-sort="subs" class="num">Inscritos</th>
-            <th data-sort="age_days" class="num">Idade</th>
-            <th data-sort="times_seen" class="num" title="Em quantas coletas o algoritmo empurrou esse vídeo">Visto</th>
+            <th data-sort="multiplier" class="num sorted desc" title="Quantas vezes o vídeo teve mais views do que o canal tem de inscritos. Ex.: 10× = 10 vezes mais views que inscritos. Quanto maior, mais o YouTube espalhou o vídeo.">Viralizou</th>
+            <th data-sort="views" class="num" title="Total de views do vídeo">Views</th>
+            <th data-sort="views_day" class="num" title="Quantas views o vídeo faz por dia, em média, desde que foi postado">Views por dia</th>
+            <th data-sort="growth_day" class="num" title="Quantas views por dia o vídeo ganhou entre as duas últimas coletas (mostra se ainda está crescendo)">Ganhou por dia</th>
+            <th data-sort="subs" class="num" title="Inscritos do canal que postou">Inscritos</th>
+            <th data-sort="age_days" class="num" title="Há quanto tempo o vídeo foi postado">Postado há</th>
+            <th data-sort="times_seen" class="num" title="Quantas vezes o vídeo apareceu na página inicial dos seus perfis (quanto mais, mais o YouTube está empurrando)">Apareceu</th>
+            <th class="col-act"></th>
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -128,23 +161,23 @@
       <header class="page-head">
         <div>
           <h1>Canais</h1>
-          <p class="muted">Concorrentes que o algoritmo mostrou. Canais novos com vídeos furando a bolha = nicho com espaço.</p>
+          <p class="muted">Os canais concorrentes que apareceram. Canal novo com vídeo viralizando = sinal de que ainda tem espaço nesse nicho.</p>
         </div>
         <div class="head-actions">
-          <select id="c-profile" class="select"></select>
+          <select id="c-profile" class="select" hidden></select>
         </div>
       </header>
       <div class="filters">
-        <label class="field"><span>Canal criado há</span>
+        <label class="field" title="Só canais novos: criados dentro desse tempo"><span>Idade do canal</span>
           <select id="c-age" class="select sm">
-            <option value="0">Qualquer</option><option value="90">até 3 meses</option>
+            <option value="0">Qualquer idade</option><option value="90">até 3 meses</option>
             <option value="180">até 6 meses</option><option value="365">até 1 ano</option>
           </select>
         </label>
-        <label class="field"><span>Inscritos até</span>
+        <label class="field" title="Só canais pequenos: com até esse número de inscritos"><span>Canal com até</span>
           <select id="c-subs" class="select sm">
-            <option value="0">Qualquer</option><option value="10000">10 mil</option>
-            <option value="100000">100 mil</option><option value="500000">500 mil</option>
+            <option value="0">Qualquer tamanho</option><option value="10000">10 mil inscritos</option>
+            <option value="100000">100 mil inscritos</option><option value="500000">500 mil inscritos</option>
           </select>
         </label>
         <input id="c-search" class="input search grow" placeholder="Buscar canal…">
@@ -153,13 +186,13 @@
         <table class="table" id="c-table">
           <thead><tr>
             <th data-sort="title">Canal</th>
-            <th data-sort="best_multiplier" class="num sorted desc">Melhor mult.</th>
-            <th data-sort="avg_views_day" class="num">Views/dia (média)</th>
-            <th data-sort="subs" class="num">Inscritos</th>
-            <th data-sort="channel_videos" class="num">Vídeos</th>
-            <th data-sort="channel_age_days" class="num">Idade</th>
-            <th data-sort="times_seen" class="num">Aparições</th>
-            <th>Vídeo destaque</th>
+            <th data-sort="best_multiplier" class="num sorted desc" title="O quanto viralizou o melhor vídeo desse canal. Quantas vezes o vídeo teve mais views do que o canal tem de inscritos. Ex.: 10× = 10 vezes mais views que inscritos. Quanto maior, mais o YouTube espalhou o vídeo.">Melhor vídeo viralizou</th>
+            <th data-sort="avg_views_day" class="num" title="Média de views por dia dos vídeos desse canal que apareceram">Views por dia</th>
+            <th data-sort="subs" class="num" title="Inscritos do canal">Inscritos</th>
+            <th data-sort="channel_videos" class="num" title="Quantos vídeos o canal tem no total">Vídeos</th>
+            <th data-sort="channel_age_days" class="num" title="Há quanto tempo o canal foi criado">Canal tem</th>
+            <th data-sort="times_seen" class="num" title="Quantas vezes vídeos desse canal apareceram nos seus perfis">Apareceu</th>
+            <th title="O vídeo desse canal que mais viralizou">Melhor vídeo</th>
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -172,32 +205,25 @@
       <header class="page-head">
         <div>
           <h1>Padrões de título</h1>
-          <p class="muted">O que os títulos dos outliers têm em comum e o resto do nicho não tem. Base para modelar.</p>
+          <p class="muted">O que os títulos dos vídeos que mais viralizaram têm de diferente dos outros. Use isso para escrever os seus títulos.</p>
         </div>
         <div class="head-actions">
-          <select id="t-profile" class="select"></select>
+          <select id="t-profile" class="select" hidden></select>
         </div>
       </header>
       <div class="filters">
-        <div class="field"><span>Formato</span>
-          <div class="seg" id="t-type">
-            <button data-v="all" class="on">Todos</button>
-            <button data-v="long">Longos</button>
-            <button data-v="short">Shorts</button>
-          </div>
-        </div>
-        <label class="field"><span>Publicado</span>
+        <label class="field" title="Só vídeos postados dentro desse tempo"><span>Postado há até</span>
           <select id="t-age" class="select sm">
             <option value="0">Qualquer data</option><option value="30">30 dias</option>
             <option value="90" selected>90 dias</option><option value="365">1 ano</option>
           </select>
         </label>
-        <div class="field"><span>Quem é outlier</span>
+        <div class="field" title="Quais vídeos contam como 'os que mais viralizaram' para comparar com o resto"><span>Quem conta como "viralizou"</span>
           <div class="seg" id="t-outlier">
-            <button data-v="top10">Top 10%</button>
-            <button data-v="top20" class="on">Top 20%</button>
-            <button data-v="min:3">Mult. ≥ 3×</button>
-            <button data-v="min:10">Mult. ≥ 10×</button>
+            <button data-v="top10" title="Os 10% de vídeos que mais viralizaram">Os 10% melhores</button>
+            <button data-v="top20" class="on" title="Os 20% de vídeos que mais viralizaram">Os 20% melhores</button>
+            <button data-v="min:3" title="Vídeos com 3 vezes mais views do que o canal tem de inscritos">Viralizou 3× ou mais</button>
+            <button data-v="min:10" title="Vídeos com 10 vezes mais views do que o canal tem de inscritos">Viralizou 10× ou mais</button>
           </div>
         </div>
       </div>
@@ -209,7 +235,7 @@
       <header class="page-head">
         <div>
           <h1>Perfis</h1>
-          <p class="muted">Contas já treinadas no nicho. O darkbot entra, rola a home e registra o que o algoritmo entrega.</p>
+          <p class="muted">Suas contas do YouTube treinadas em um nicho. O darkbot entra nelas, rola a página inicial e anota os vídeos que o YouTube mostra.</p>
         </div>
         <div class="head-actions">
           <button class="btn primary" id="btn-new-profile">
@@ -221,9 +247,31 @@
       <h2 class="section-title">Últimas coletas</h2>
       <div class="table-wrap">
         <table class="table compact" id="runs-table">
-          <thead><tr><th>Perfil</th><th>Início</th><th>Status</th><th class="num">Vídeos</th><th>Detalhe</th></tr></thead>
+          <thead><tr><th>Perfil</th><th>Quando</th><th>Situação</th><th class="num">Vídeos</th><th>Detalhe</th><th class="col-act"></th></tr></thead>
           <tbody></tbody>
         </table>
+      </div>
+    </section>
+
+    <!-- Pesquisa de mercado -->
+    <section class="page" id="page-research">
+      <header class="page-head">
+        <div>
+          <h1>Pesquisa de mercado</h1>
+          <p class="muted">Cole um vídeo ou escreva um assunto: o darkbot acha os vídeos parecidos que estão viralizando, lê os comentários e a IA diz o que vale a pena fazer.</p>
+        </div>
+        <div class="head-actions">
+          <button class="btn ghost" id="r-new-kw">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg>Palavras-chave
+          </button>
+          <button class="btn primary" id="r-new-video">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Partir de um vídeo
+          </button>
+        </div>
+      </header>
+      <div class="research">
+        <div class="r-list" id="r-list"></div>
+        <div class="r-detail" id="r-detail"></div>
       </div>
     </section>
 
@@ -236,13 +284,75 @@
         </div>
       </header>
       <div class="panel">
-        <h3>YouTube Data API</h3>
-        <p class="muted">Usada para puxar views, inscritos e datas exatas. Cada 50 vídeos custam 1 unidade de cota (limite diário: 10.000).</p>
+        <h3>Chave do YouTube</h3>
+        <p class="muted">É o que deixa o darkbot ver os números certos (views, inscritos, data de postagem). É grátis, com um limite por dia que dá e sobra.</p>
         <div class="row">
           <input id="s-key" class="input grow" type="password" placeholder="Cole a chave da API aqui">
           <button class="btn primary" id="s-save">Salvar</button>
         </div>
         <div class="hint" id="s-status"></div>
+      </div>
+      <div class="panel">
+        <h3>Inteligência artificial</h3>
+        <p class="muted">A IA que lê os vídeos, separa o que presta e escreve as análises. Escolha qual usar. Cada análise é feita uma vez e fica guardada: trocar de IA não refaz (nem cobra de novo) o que já foi feito.</p>
+        <div class="field col"><span>Qual IA usar</span>
+          <div class="seg" id="s-provider">
+            <button data-v="anthropic" title="Claude, da Anthropic">Claude (Anthropic)</button>
+            <button data-v="openai" title="ChatGPT, da OpenAI">ChatGPT (OpenAI)</button>
+          </div>
+        </div>
+        <div class="ai-provs">
+          <div class="ai-prov" data-prov="anthropic">
+            <div class="ai-prov-head"><b>Claude (Anthropic)</b><span class="tag" id="s-anthropic-badge"></span></div>
+            <div class="row">
+              <input id="s-anthropic-key" class="input grow" type="password" placeholder="Cole a chave da Anthropic (começa com sk-ant-)">
+              <button class="btn" data-save-key="anthropic">Salvar</button>
+            </div>
+            <div class="hint" id="s-anthropic-status"></div>
+            <div class="prov-models" id="s-anthropic-modelbox" hidden>
+              <label class="field col" title="Usado nas tarefas rápidas e em quantidade: separar o que presta, traduzir, classificar canais, Método Malandro."><span>Modelo rápido</span><select class="select" data-model="anthropic:fast"></select></label>
+              <label class="field col" title="Usado nas análises, relatórios e ideias de variações."><span>Modelo inteligente</span><select class="select" data-model="anthropic:smart"></select></label>
+              <div class="dim small">Preço por milhão de tokens: entrada / saída (1 milhão de tokens ≈ 750 mil palavras).</div>
+              <div class="cost-table" id="s-anthropic-cost"></div>
+              <button class="btn sm" data-save-models="anthropic" title="Testa os modelos na sua conta e salva">Testar e salvar modelos</button>
+            </div>
+          </div>
+          <div class="ai-prov" data-prov="openai">
+            <div class="ai-prov-head"><b>ChatGPT (OpenAI)</b><span class="tag" id="s-openai-badge"></span></div>
+            <div class="row">
+              <input id="s-openai-key" class="input grow" type="password" placeholder="Cole a chave da OpenAI (começa com sk-)">
+              <button class="btn" data-save-key="openai">Salvar</button>
+            </div>
+            <div class="hint" id="s-openai-status"></div>
+            <div class="prov-models" id="s-openai-modelbox" hidden>
+              <label class="field col" title="Usado nas tarefas rápidas e em quantidade: separar o que presta, traduzir, classificar canais, Método Malandro. No lugar do Haiku do Claude."><span>Modelo rápido (no lugar do Haiku)</span><select class="select" data-model="openai:fast"></select></label>
+              <label class="field col" title="Usado nas análises, relatórios e ideias de variações. No lugar do Sonnet do Claude."><span>Modelo inteligente (no lugar do Sonnet)</span><select class="select" data-model="openai:smart"></select></label>
+              <div class="dim small">Preço por milhão de tokens: entrada / saída (1 milhão de tokens ≈ 750 mil palavras).</div>
+              <div class="cost-table" id="s-openai-cost"></div>
+              <button class="btn sm" data-save-models="openai" title="Testa os modelos na sua conta e salva">Testar e salvar modelos</button>
+            </div>
+          </div>
+        </div>
+        <div class="hint" id="s-ai"></div>
+      </div>
+      <div class="panel">
+        <h3>Seu canal</h3>
+        <p class="muted">Em que idioma a IA escreve os títulos, ganchos, descrições e tags para você. Vídeos de outros países são adaptados para esse idioma.</p>
+        <div class="row">
+          <select id="s-lang" class="select grow">
+            <option>português do Brasil</option><option>português de Portugal</option><option>inglês (EUA)</option>
+            <option>espanhol (América Latina)</option><option>espanhol (Espanha)</option><option>francês</option>
+            <option>alemão</option><option>italiano</option><option>hindi</option><option>indonésio</option>
+            <option>japonês</option><option>coreano</option><option>russo</option><option>turco</option><option>árabe</option>
+          </select>
+          <button class="btn" id="s-lang-save">Salvar</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>Classificação dos canais</h3>
+        <p class="muted">A IA decide se cada canal é dark (ninguém aparece, feito para rodar sozinho) ou não (youtuber, cortes, música, artista, TV). Quando você marca "Não é dark" ou "É dark", vale na hora e a IA aprende com isso.</p>
+        <div class="row"><div class="hint grow" id="s-class"></div><button class="btn" id="s-reclass">Reclassificar</button></div>
+        <div class="row"><div class="hint grow" id="s-hidden"></div><button class="btn ghost" id="s-unhide">Mostrar de novo</button></div>
       </div>
     </section>
   </main>
@@ -260,7 +370,7 @@
       </div>
       <div class="modal-body">
         <div id="m-import">
-          <p class="muted small">Escolha o perfil do Chrome que já está treinado no nicho. O Chrome precisa estar fechado durante a cópia.</p>
+          <p class="muted small">Escolha o perfil do Chrome que já está treinado no nicho. Pode deixar o Chrome aberto; só esse perfil precisa estar com as janelas fechadas.</p>
           <div class="chrome-list" id="m-chrome"></div>
         </div>
         <div id="m-new" hidden>
@@ -268,6 +378,7 @@
         </div>
         <label class="field col"><span>Nome</span><input id="m-name" class="input" placeholder="Ex.: Mistério PT-BR"></label>
         <label class="field col"><span>Nicho</span><input id="m-niche" class="input" placeholder="Ex.: mistério, true crime, curiosidades"></label>
+        <div class="ai-hint" id="m-ai" hidden></div>
         <div class="field col"><span>Tipo</span>
           <div class="seg" id="m-kind">
             <button data-v="nicho" class="on">Nicho específico</button>
@@ -280,6 +391,85 @@
         <button class="btn primary" id="m-save">Adicionar</button>
       </div>
     </div>
+  </div>
+
+  <!-- Modal: nova pesquisa -->
+  <div class="modal-bg" id="rmodal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h3>Nova pesquisa</h3>
+        <button class="icon-btn" data-rclose><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="seg full" id="r-mode">
+        <button data-v="video" class="on">Partir de um vídeo</button>
+        <button data-v="keyword">Palavras-chave</button>
+        <button data-v="history">Histórico do perfil</button>
+      </div>
+      <div class="modal-body">
+        <div id="r-video-box">
+          <p class="muted small">Cole o link de um vídeo de referência. O darkbot abre os sugeridos, entra nos sugeridos deles e busca vídeos parecidos (os melhores e os mais recentes).</p>
+          <label class="field col"><span>Link do vídeo</span><input id="r-link" class="input" placeholder="https://www.youtube.com/watch?v=..."></label>
+        </div>
+        <div id="r-kw-box" hidden>
+          <p class="muted small">Uma busca por linha (ou separadas por vírgula). Para cada uma: o que saiu nesta semana, o que mais explodiu no mês e as referências do ano.</p>
+          <label class="field col"><span>Palavras-chave</span><textarea id="r-kws" class="input area" rows="4" placeholder="histórias de terror reais&#10;relatos sobrenaturais&#10;casos arrepiantes"></textarea></label>
+          <div class="terms" id="r-niches"></div>
+        </div>
+        <div id="r-hist-box" hidden>
+          <p class="muted small">Parte do que o perfil <b>assistiu</b> (colete o histórico no card do perfil antes): a IA acha o centro do nicho, abre os sugeridos e busca os melhores e os mais recentes. Bom para quando o conteúdo ficou desnichado.</p>
+          <label class="field col"><span>Perfil</span><select id="r-hist-profile" class="select"></select></label>
+        </div>
+        <div class="r-modal-row">
+          <label class="field col"><span>Período</span><select id="r-period" class="select sm period-sel" title="Só traz vídeos postados dentro desse tempo">
+            <option value="7">Última semana</option><option value="30" selected>Último mês</option>
+            <option value="90">Últimos 3 meses</option><option value="365">Último ano</option><option value="0">Qualquer data</option>
+          </select></label>
+          <div class="field col grow"><span>Idiomas da busca</span><div class="lang-picker" id="r-langs"></div></div>
+        </div>
+        <label class="check r-check"><input type="checkbox" id="r-report" checked> Gerar relatório com IA <span class="dim">(+ ~US$ 0,08 · a pesquisa sozinha custa ~US$ 0,07)</span></label>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" data-rclose>Cancelar</button>
+        <button class="btn primary" id="r-start">Pesquisar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: coletas -->
+  <div class="modal-bg" id="runs-modal" hidden>
+    <div class="modal wide">
+      <div class="modal-head">
+        <h3>Coletas</h3>
+        <button class="icon-btn" data-runs-close><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <p class="muted small">Escolha uma coleta para ver só os vídeos dela, ou marque as que deram errado e exclua: os vídeos, números, comentários e canais que só existiam nelas somem.</p>
+        <div class="runs-list" id="runs-list"></div>
+      </div>
+      <div class="modal-foot">
+        <span class="dim small grow" id="runs-sel"></span>
+        <button class="btn ghost" data-runs-close>Fechar</button>
+        <button class="btn danger" id="runs-del" disabled>Excluir selecionadas</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Escolher o perfil em uso -->
+  <div class="modal-bg" id="pick-modal" hidden>
+    <div class="modal">
+      <div class="modal-head"><h3>Qual perfil você vai usar?</h3>
+        <button class="icon-btn" data-pick-close title="Fechar"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+      <div class="modal-body">
+        <p class="muted small">Cada perfil tem as suas coisas: o que aparece em Descobertas, as pesquisas e as coletas são só desse perfil. Dá para trocar a qualquer momento clicando no perfil, lá em cima na barra da esquerda.</p>
+        <div class="pick-list" id="pick-list"></div>
+      </div>
+      <div class="modal-foot"><button class="btn ghost" id="pick-add">Adicionar um perfil novo</button></div>
+    </div>
+  </div>
+
+  <!-- Painel de prévia do vídeo -->
+  <div class="drawer-bg" id="pv" hidden>
+    <aside class="drawer" id="pv-body"></aside>
   </div>
 
   <div class="jobs" id="jobs"></div>
