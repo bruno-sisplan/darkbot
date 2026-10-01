@@ -28,7 +28,7 @@ Palavras e ideias do próprio usuário, organizadas:
 - **Começar amplo e ir aprofundando**, com possibilidade de **adicionar coisas pré-existentes** (canais que ele já tem rodando).
 - O radar é **só o ponto de partida**: a ferramenta vai ganhar muitas funções, e várias delas vão precisar de **scraping** (por isso Python).
 - **Rapidez e fluidez são essenciais.** Nada pode ser lento.
-- Outra pessoa (sócio ou equipe) precisa **acessar também**.
+- Outras pessoas (clientes, sócio, equipe) usam o app **cada uma no próprio PC**, com o próprio banco (ver seção 3).
 - Integrar a **API do Claude para a IA analisar**, e talvez **skills e agentes**, mas **gastando poucos tokens**: "tem que ser econômico, mas não quero nada burro também".
 - Um **.exe bonito e bem estilizado**, que se **auto-atualiza pelo GitHub**. Isso fica **POR ÚLTIMO**.
 - **Configuração toda no código (hardcoded), sem .env.**
@@ -45,7 +45,7 @@ Palavras e ideias do próprio usuário, organizadas:
 | **Playwright usando o Chrome instalado** (`channel="chrome"`) | Não precisa baixar outro navegador e a sessão copiada funciona com o Chrome real. |
 | **Scraping lê o JSON interno do YouTube** (`ytInitialData` + respostas `/youtubei/v1/browse`), não o HTML | O HTML muda o tempo todo; o JSON é bem mais estável. |
 | **O scraping descobre os vídeos, a API oficial dá os números** | A YouTube Data API custa 1 unidade de cota a cada 50 vídeos (quase de graça). Já a busca custa 100 unidades, por isso a descoberta é feita pelo scraping. |
-| **SQLite local agora, Supabase depois** | Poucas pessoas vão usar, com login. Todo acesso ao banco passa por `app/db.py`, para facilitar a troca. |
+| **Banco SQLite local, um por cliente. Sem Supabase** | Decisão do usuário em 01/10/2026: o banco tem que ser local para cada cliente (cada um com os próprios dados, perfis e chaves no PC dele, sem servidor nem custo de hospedagem). O Supabase foi cogitado e **descartado**: não sugerir de novo. Para passar dados de uma pessoa para outra, o caminho é exportar/importar (ex.: "Exportar pesquisa"). |
 | **Parâmetros fixos em `app/config.py`, chaves na aba Configurações** | No começo o usuário pediu "tudo hardcoded, sem .env". Depois pediu para as chaves irem para a aba Configurações (salvas no banco local), o que também é o certo para o .exe. Sem .env até hoje. |
 | **Claude OU ChatGPT** | Pedido do usuário: escolha do provedor em Configurações. Cache de análises vale para os dois. |
 | **.exe = lançador C# + app onedir** | "Não pode demorar pra abrir, um exe só". Ver o item ".exe para distribuir" na seção 9. Auto-update ainda não existe. |
@@ -55,7 +55,7 @@ Palavras e ideias do próprio usuário, organizadas:
 ### Pontos em aberto já discutidos (sem decisão final)
 
 - **Chaves (resolvido em 30/09/2026):** ficam na aba **Configurações** (tabela `settings` do banco local), nunca no código nem no .exe. O `app/secrets.py` antigo (ignorado pelo git) só serve para a migração automática na primeira abertura. Para levar as chaves a outro PC, o usuário usa o `MINHAS_CHAVES.txt` (na raiz, ignorado pelo git) e cola em Configurações.
-- **Token do auto-update:** qualquer token embutido no exe pode ser extraído. Duas opções foram recomendadas: (a) código num repo privado e os executáveis num repo **público** só de releases, sem token; ou (b) token *fine-grained* **somente leitura** de um único repo. As chaves do YouTube e do Claude também não deveriam ficar dentro do exe distribuído: com o Supabase, elas passam a ficar no banco, protegidas por RLS e liberadas só depois do login.
+- **Token do auto-update:** qualquer token embutido no exe pode ser extraído. Duas opções foram recomendadas: (a) código num repo privado e os executáveis num repo **público** só de releases, sem token; ou (b) token *fine-grained* **somente leitura** de um único repo. As chaves nunca vão dentro do exe: cada cliente coloca as próprias na aba Configurações (ficam no banco local dele).
 
 ## 4. Gosto visual do usuário (importante)
 
@@ -86,6 +86,7 @@ app/
   ai_label.py           selo "gerado por IA" do YouTube (lê a página do vídeo)
   research.py           pesquisa de mercado (descoberta em camadas, período, comentários, relatório)
   malandro.py           Método Malandro (em que línguas ninguém fez o vídeo)
+  proximos.py           Meu canal: vídeos modelados, DNA do canal, mapa de território, próximos vídeos, fila
   youtube_web.py        páginas públicas do YouTube sem navegador (sugeridos, busca)
   paths.py              pastas de dados (%LOCALAPPDATA%\darkbot, ou DARKBOT_HOME) e da interface (compatível com PyInstaller)
   db.py                 SQLite: schema, helpers rows/row/tx, settings
@@ -195,7 +196,7 @@ O teste real foi feito em 30/09/2026 com o perfil "Tecnologia": a cópia do Chro
 
 ## 9. Onde paramos e próximos passos (em ordem)
 
-**Última coisa feita (01/10/2026):** .exe gerado e testado (`tools/build_exe.py`, ver o item ".exe para distribuir"), perfil deslogado testado, tudo commitado (`34b72d3`), `COMO_GERAR_VERSAO.txt` criado e `MINHAS_CHAVES.txt` (ignorado pelo git) para o usuário levar as chaves a outro PC. Os itens abaixo estão em ordem cronológica: cada bloco em negrito é um recurso, com o porquê e os detalhes técnicos.
+**Última coisa feita (01/10/2026):** aba Meu canal (ver o item no fim desta seção). Antes disso: .exe gerado e testado (`tools/build_exe.py`, ver o item ".exe para distribuir"), perfil deslogado testado, tudo commitado (`34b72d3`), `COMO_GERAR_VERSAO.txt` criado e `MINHAS_CHAVES.txt` (ignorado pelo git) para o usuário levar as chaves a outro PC. Os itens abaixo estão em ordem cronológica: cada bloco em negrito é um recurso, com o porquê e os detalhes técnicos.
 
 **Primeiros ajustes (30/09/2026):** ambiente montado na segunda máquina (venv com Python 3.13, demo gerada), **shorts removidos de tudo**, importação sem precisar fechar o Chrome (só o perfil escolhido não pode estar aberto) e correção do `darkbot.bat`: com `pythonw` o stdout é None, o log do uvicorn quebrava e o app fechava em silêncio. Agora, sem console, a saída vai para `%LOCALAPPDATA%\darkbot\darkbot.log`.
 
@@ -289,6 +290,33 @@ O teste real foi feito em 30/09/2026 com o perfil "Tecnologia": a cópia do Chro
 
 **Perfil deslogado (01/10/2026):** o usuário quer poder usar perfis SEM conta do YouTube. Testado: perfil novo e deslogado = home vazia (0 vídeos); depois de assistir 6 vídeos do nicho (35s cada) = 93 vídeos na home, quase todos no nicho (algum ruído regional). O YouTube recomenda pelo histórico em cookie. Cuidados: treinar DENTRO do perfil do darkbot ("Criar e logar" sem logar + "Treinar o perfil"), porque a cópia de perfil do Chrome pode perder os cookies; "Coletar o que assistiu" exige login; limpar cookies zera o perfil. Pesquisa IA, Malandro, variações, busca e sugeridos não dependem de login (sempre como visitante). A mensagem de home vazia agora sugere logar OU treinar.
 
+**Meu canal (01/10/2026), o "após":** o usuário explicou que o Método Malandro resolve UM vídeo (em que língua ninguém
+fez), mas falta o "e depois?": modelei esse, e agora? Primeiro foi feita uma página "Próximos vídeos"; logo em seguida o
+usuário pediu para **separar**: Descobertas fica como o lado CERTO (de onde partir) e uma aba própria faz o "após".
+Decisões dele: **não logar na conta do canal** (ele usa proxy nos canais; tudo sai do perfil); a lista de **vídeos já
+modelados é a verdade**; adicionar **por link** ou pelo botão **"Já modelei"** em Descobertas e na prévia (o antigo
+"E depois desse?" saiu da prévia); as sugestões devem ser **mais diferentes, no mesmo assunto**, e não repetir
+Descobertas. Pediu "bola algo interessante": entraram o **DNA do canal**, o **mapa de território** e a **ousadia**.
+- `app/proximos.py`, aba **Meu canal** (Radar, logo abaixo de Descobertas). Tabelas `modeled` (dados do original
+  guardados na hora: do banco ou pela API, 2 unidades), `channel_dna`, `queue` (só "vou fazer"; marcar feito vira
+  modelado) e `next_runs`. Rotas `/api/modeled`, `/api/dna`, `/api/next`, `/api/queue`.
+- **DNA** (`dna:v1`, Sonnet esforço baixo, ~US$ 0,01): resumo, temas, formatos, ângulos, público e estilo dos títulos,
+  a partir dos modelados. **Correções do editor** (texto livre) valem como verdade e marcam o DNA como desatualizado.
+  A rodada refaz o DNA sozinha se estiver desatualizado.
+- **Rodada** (`next-plan:v2` Haiku + `next:v2` Sonnet, ~US$ 0,05, ~45s): contexto (DNA, modelados, fila, top de
+  Descobertas como "lado seguro, não repetir", pesquisas, comentários) → 10 buscas com a distribuição da ousadia
+  (perto / equilibrado / ousado, `BOLDNESS`) → semana por data + mês por views no idioma do canal → **exclui** modelados,
+  fila e tudo que já está nas coletas do perfil → juiz com o nicho (nota ≥ 2) → números → longos, ≤ 90 dias, com
+  potencial (top 40) → **territórios** (seu / fronteira / saturado, com calor e provas) + 8 próximos (continuação,
+  vizinho, pedido, tendência, **ângulo novo**; com território, motivo, provas, chance e gancho) + estratégia.
+- O texto da IA não pode citar os números da tabela (o editor não vê a tabela): regra no prompt.
+- Teste (cópia do banco, Stoic com 3 modelados de estoicismo, ousado): DNA certeiro; fronteiras "Estoicismo para
+  mulheres" (17x em 7 dias) e "Estoicismo e psicologia" (881 mil views); 8 sugestões no mesmo assunto. 44s, US$ 0,053.
+- Correção junto: o juiz de relevância e o "mesmo vídeo" do Malandro cortavam a resposta quando muitos vídeos passavam
+  (teto de tokens pequeno). Teto aumentado (só se paga o que a IA escreve).
+- Também em 01/10/2026: decidido **sem Supabase** (banco local, um por cliente); gerador de título/descrição/tags
+  começado e **desfeito a pedido do usuário** ("não precisa montar títulos ainda").
+
 **Pendente com o usuário:**
 - Mandar o .exe para o colega e ver se funciona no PC dele (o `.exe` atual foi gerado ANTES da mensagem nova de "home vazia": gerar de novo antes de mandar).
 - As chaves da OpenAI e da Anthropic apareceram no chat de desenvolvimento: recomendado gerar chaves novas nos painéis.
@@ -302,9 +330,9 @@ O teste real foi feito em 30/09/2026 com o perfil "Tecnologia": a cópia do Chro
 3. ✅ **Sugestões dos vídeos:** feito na pesquisa em profundidade (sugeridos em camadas, só pelos relevantes).
 4. **Coleta agendada:** coletar sozinho a cada X horas, para alimentar o "crescimento".
 5. **Transcrições** com yt-dlp (gancho dos primeiros 30s, estrutura de roteiro), na sidebar como "EM BREVE".
-6. **Gerador de título, descrição e tags** para o vídeo do usuário, usando pesquisas, comentários, variações e o idioma do canal.
+6. ⏸️ **Gerador de título, descrição e tags** (adiado pelo usuário em 01/10/2026) para o vídeo do usuário, usando pesquisas, comentários, variações e o idioma do canal.
 7. **Seus canais:** cadastrar os canais que já estão rodando e comparar com a concorrência. Mais para frente, a YouTube Analytics API (retenção e CTR reais).
-8. **Supabase:** dados compartilhados entre as pessoas, login por e-mail, chaves no banco protegidas por RLS. Trocar a implementação de `app/db.py`.
+8. ❌ **Supabase: descartado em 01/10/2026.** O banco fica local, um por cliente. No lugar, se precisar levar dados de um PC para outro: **Exportar/Importar** (pesquisa, coleta ou o banco inteiro) num arquivo.
 9. **Agentes e skills:** agentes consultando o banco por ferramentas ("me dá os 20 outliers do nicho X"), em vez de receber tudo no prompt.
 10. 🟡 **.exe:** feito (`tools/build_exe.py`). Falta o **auto-update**: GitHub Actions publicando um Release a cada tag `vX.Y.Z`; o lançador checa o último Release ao abrir, baixa e descompacta a versão nova numa pasta nova (o formato atual já separa versões por pasta). Ver a questão do token na seção 3.
 

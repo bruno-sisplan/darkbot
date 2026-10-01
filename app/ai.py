@@ -659,7 +659,7 @@ def judge_same_video(reference: str, items: list[tuple[str, str]], batch: int = 
         user = "\n".join(f"{i} | {' '.join((t or '').split())[:120]}" for i, (_vid, t) in enumerate(part, 1))
         target = hashlib.sha1((system + user).encode()).hexdigest()[:20]
         res = _run("same:v1", target, config.AI_MODEL_FAST, system, user, SameVideoList,
-                   max_tokens=14 * len(part) + 150)
+                   max_tokens=26 * len(part) + 200)  # teto para todos passarem; só se paga o que a IA escreve
         return {part[x["n"] - 1][0]: (max(0, min(3, x["r"])), x["l"].lower()[:2])
                 for x in res["items"] if 1 <= x["n"] <= len(part)}
 
@@ -678,7 +678,7 @@ def judge_relevance(topic: str, items: list[tuple[str, str]], batch: int = 100) 
         user = "\n".join(f"{i} | {' '.join((t or '').split())[:120]}" for i, (_vid, t) in enumerate(part, 1))
         target = hashlib.sha1((system + user).encode()).hexdigest()[:20]
         res = _run("rel:v2", target, config.AI_MODEL_FAST, system, user, RelevanceList,
-                   max_tokens=10 * len(part) + 150)
+                   max_tokens=20 * len(part) + 200)  # teto para todos passarem; só se paga o que a IA escreve
         return {part[x["n"] - 1][0]: max(0, min(3, x["r"])) for x in res["items"] if 1 <= x["n"] <= len(part)}
 
     parts = [items[i:i + batch] for i in range(0, len(items), batch)]

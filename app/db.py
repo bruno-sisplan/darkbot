@@ -1,4 +1,4 @@
-"""Banco local (SQLite). Toda leitura/escrita passa por aqui para facilitar a troca por Supabase depois."""
+"""Banco local (SQLite), um por cliente: cada PC tem os próprios dados. Toda leitura/escrita passa por aqui."""
 import sqlite3
 from contextlib import contextmanager
 
@@ -142,6 +142,55 @@ CREATE TABLE IF NOT EXISTS ai_results (
     cost_usd      REAL,
     created_at    TEXT,
     PRIMARY KEY (kind, target)
+);
+
+-- Fila do canal (Próximos vídeos): o que o editor vai fazer e o que já fez. Dá a sequência às sugestões.
+CREATE TABLE IF NOT EXISTS queue (
+    id         INTEGER PRIMARY KEY,
+    profile_id INTEGER,
+    title      TEXT,
+    status     TEXT,            -- 'planned' (vou fazer) ou 'done' (já fiz)
+    video_id   TEXT,            -- vídeo de referência (opcional)
+    kind       TEXT,            -- continuacao, vizinho, pedido, tendencia (quando veio de uma sugestão)
+    note       TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
+
+-- Meu canal: vídeos que o editor JÁ MODELOU (a verdade sobre o canal). Dados do original guardados na hora.
+CREATE TABLE IF NOT EXISTS modeled (
+    id            INTEGER PRIMARY KEY,
+    profile_id    INTEGER,
+    video_id      TEXT,         -- vídeo original que serviu de modelo (opcional se só tiver o título)
+    title         TEXT,         -- título do original
+    my_title      TEXT,         -- título que o editor usou (opcional)
+    channel_title TEXT,
+    views         INTEGER,
+    subs          INTEGER,
+    multiplier    REAL,
+    lang          TEXT,
+    published_at  TEXT,
+    description   TEXT,
+    tags          TEXT,
+    created_at    TEXT
+);
+
+-- DNA do canal (o que a IA entendeu dos modelados) + correções do editor.
+CREATE TABLE IF NOT EXISTS channel_dna (
+    profile_id  INTEGER PRIMARY KEY,
+    result      TEXT,           -- JSON
+    modeled_sig TEXT,           -- assinatura da lista de modelados usada (mudou = desatualizado)
+    notes       TEXT,           -- correções do editor (valem como verdade)
+    updated_at  TEXT
+);
+
+-- Cada rodada de "Meu canal" (mapa + próximos vídeos, resultado completo em JSON), para o histórico.
+CREATE TABLE IF NOT EXISTS next_runs (
+    id              INTEGER PRIMARY KEY,
+    profile_id      INTEGER,
+    anchor_video_id TEXT,       -- vídeo que o editor acabou de modelar (opcional)
+    result          TEXT,
+    created_at      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sightings_video ON sightings(video_id);

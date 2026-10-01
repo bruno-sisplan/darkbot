@@ -147,7 +147,7 @@ function rowActions(v) {
       title="${v.is_dark ? "Marcar: este canal NÃO é dark (sai do filtro e a IA aprende)" : "Marcar: este canal É dark"}">
       ${v.is_dark ? `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M6 6l12 12"/></svg>`
         : `<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>`}</button>` : ""}
-    ${seedBtn(v.video_id)}</div>`;
+    ${modeledBtn(v.video_id)}${seedBtn(v.video_id)}</div>`;
 }
 
 // Ações globais (tabelas, prévia): ocultar vídeo e corrigir "dark" do canal.
@@ -189,6 +189,7 @@ $$(".nav-item").forEach((b) =>
     if (b.dataset.page === "settings") loadSettings();
     if (b.dataset.page === "titles") loadTitles();
     if (b.dataset.page === "research") loadResearch();
+    if (b.dataset.page === "next") loadNext();
   })
 );
 
@@ -1321,6 +1322,7 @@ function renderPreview() {
       <button class="btn primary sm" id="pv-yt">Abrir no YouTube</button>
       <button class="btn sm" data-copy-link="${link}">Copiar link</button>
       <button class="btn sm" data-seed="${v.video_id}" title="Procura vídeos parecidos com este">Achar parecidos</button>
+      <button class="btn sm ${state.modeled.has(v.video_id) ? "primary" : ""}" data-modeled="${v.video_id}" title="${state.modeled.has(v.video_id) ? "Já está em Meu canal (clique para tirar)" : "Você já modelou este vídeo: leva para Meu canal"}">${state.modeled.has(v.video_id) ? "✓ Modelado" : "Já modelei"}</button>
       <button class="btn ghost sm" data-hide="${v.video_id}" ${v.hidden ? `data-unhide="1"` : ""} title="${v.hidden ? "Voltar a mostrar nas listas" : "Esconder este vídeo das listas"}">${v.hidden ? "Mostrar de novo" : "Esconder"}</button>
     </div>
 
@@ -1357,6 +1359,7 @@ function renderPreview() {
       <div class="pv-h"><h3>Método Malandro</h3><span class="dim small">em que língua ninguém fez este vídeo</span></div>
       ${renderMalandro(PV.data.malandro, v.video_id)}
     </div>
+
 
     <div class="pv-section">
       <div class="pv-h"><h3>Análise com IA</h3>${a ? `<button class="btn ghost sm" id="pv-reanalyze">Refazer</button>` : ""}</div>
@@ -1746,12 +1749,14 @@ async function refreshAll() {
     try { localStorage.setItem("profile", String(state.profile)); } catch {}
   }
   fillProfileSelects();
+  await loadModeledIds();
   await loadRunOptions();
   await Promise.all([loadVideos(), loadOverview()]);
   if ($("#page-profiles").classList.contains("active")) loadProfiles();
   if ($("#page-channels").classList.contains("active")) loadChannels();
   if ($("#page-titles").classList.contains("active")) loadTitles();
   if ($("#page-research").classList.contains("active")) loadResearch();
+  if ($("#page-next").classList.contains("active")) loadNext();
 }
 
 (async () => {
@@ -1767,3 +1772,262 @@ async function refreshAll() {
   if (!state.profile) openProfilePicker(true);
   (await api("/api/jobs")).filter((j) => j.status === "running").forEach(watchJob);
 })();
+
+// ---------------------------------------------------------------- Meu canal (o "após": modelados, DNA, mapa, próximos)
+
+const NX = { runs: [], data: null, queue: [], modeled: [], dna: null, kinds: {}, boldness: {} };
+const NX_KIND_TIP = {
+  continuacao: "Continuação: uma parte 2, ou outro caso no mesmo formato do que você já fez",
+  vizinho: "Tema vizinho: outro assunto que o mesmo público assiste e que está funcionando agora",
+  pedido: "Pedido do público: o pessoal pediu isso nos comentários dos vídeos do nicho",
+  tendencia: "Tendência agora: explodiu nos últimos dias no nicho (faça logo, perde a validade rápido)",
+  angulo: "Ângulo novo: o mesmo assunto, contado de um jeito que ninguém do seu nicho fez",
+};
+const BOLD_TIP = {
+  perto: "Perto: continua o que você já faz e funciona. Pouco risco.",
+  equilibrado: "Equilibrado: um pouco de continuação, temas vizinhos e 1 ou 2 ângulos novos.",
+  ousado: "Ousado: foca na fronteira, assuntos e ângulos que você nunca fez, mas que estão em alta no nicho. Mesmo público, sem ser aleatório.",
+};
+const TERR = { seu: ["Seu território", "Assuntos que você já faz e que seguem em alta: continuação segura"],
+  fronteira: ["Fronteira", "Vizinhos do que você faz, em alta, e você NUNCA fez: é aqui que está a oportunidade"],
+  saturado: ["Saturado", "Muita gente já está fazendo: difícil se destacar"] };
+const boldness = () => { try { return localStorage.getItem("boldness") || "equilibrado"; } catch { return "equilibrado"; } };
+
+// Vídeos modelados do perfil em uso (para marcar "Já modelei" em Descobertas e na prévia).
+state.modeled = new Map();
+async function loadModeledIds() {
+  state.modeled = new Map();
+  if (!state.profile) return;
+  try { (await api(`/api/modeled?profile_id=${state.profile}`)).forEach((m) => m.video_id && state.modeled.set(m.video_id, m.id)); } catch {}
+}
+
+async function loadNext(runId = null) {
+  if (!state.profile) {
+    $("#mc-modeled").innerHTML = `<div class="empty"><b>Escolha o perfil em uso</b>Meu canal é do perfil que você está usando.</div>`;
+    ["#mc-run", "#mc-result", "#mc-dna", "#mc-queue"].forEach((s) => ($(s).innerHTML = ""));
+    return;
+  }
+  const pid = state.profile;
+  const [d, q, m, dna] = await Promise.all([api(`/api/next?profile_id=${pid}`), api(`/api/queue?profile_id=${pid}`),
+    api(`/api/modeled?profile_id=${pid}`), api(`/api/dna?profile_id=${pid}`)]);
+  Object.assign(NX, { runs: d.runs, kinds: d.kinds, boldness: d.boldness, queue: q, modeled: m, dna });
+  state.modeled = new Map(m.filter((x) => x.video_id).map((x) => [x.video_id, x.id]));
+  NX.data = runId ? await api(`/api/next/${runId}`) : d.latest;
+  $("#nx-history").hidden = NX.runs.length < 2;
+  $("#nx-history").innerHTML = NX.runs.map((r) => `<option value="${r.id}" ${NX.data && NX.data.id === r.id ? "selected" : ""}>
+    ${fmtDate(r.created_at)} · ${esc(NX.boldness[r.boldness] || "")}</option>`).join("");
+  renderModeled(); renderDNA(); renderRun(); renderNext(); renderQueue();
+}
+
+function renderModeled() {
+  const card = (m) => `<div class="mc-card">
+    ${m.video_id ? `<img loading="lazy" src="https://i.ytimg.com/vi/${m.video_id}/mqdefault.jpg" alt="" data-vref="${m.video_id}" title="Ver o vídeo original">` : `<div class="noimg">SÓ TÍTULO</div>`}
+    <div style="min-width:0">
+      ${m.title ? `<div class="t" title="Vídeo original: ${esc(m.title)}">${esc(m.title)}</div>` : ""}
+      <div class="mine ${m.my_title ? "" : "empty-mine"}" data-my-title="${m.id}" title="Título que você usou (clique para editar)">${m.my_title ? `Seu título: ${esc(m.my_title)}` : "+ título que você usou"}</div>
+      ${m.title ? `<div class="m">${esc(m.channel_title || "")}${m.multiplier != null ? ` · viralizou ${fmtMult(m.multiplier)}` : ""}</div>` : ""}
+    </div>
+    <button class="icon-btn" data-mdel="${m.id}" title="Tirar da lista"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>`;
+  $("#mc-modeled").innerHTML = `
+    <div class="box-head"><h3>Vídeos que modelei</h3><span class="dim small" title="A IA trata esta lista como a verdade sobre o seu canal">${NX.modeled.length} vídeo${NX.modeled.length === 1 ? "" : "s"} · a verdade sobre o seu canal</span></div>
+    <form class="mc-form" id="mc-add">
+      <input class="input" id="mc-link" placeholder="Cole o link do vídeo que você modelou" title="Link do vídeo ORIGINAL que serviu de modelo">
+      <input class="input" id="mc-mine" placeholder="Título que você usou (opcional)">
+      <button class="btn primary sm" type="submit">Adicionar</button>
+    </form>
+    ${NX.modeled.length ? `<div class="mc-list">${NX.modeled.map(card).join("")}</div>`
+      : `<p class="dim small">Nenhum ainda. Cole o link aqui, ou use o botão <b>Já modelei</b> nas linhas de Descobertas e na prévia de um vídeo.</p>`}`;
+}
+
+function renderDNA() {
+  const d = NX.dna, x = d.dna;
+  const chips = (arr) => `<div class="dna-chips">${arr.map((t) => `<i>${esc(t)}</i>`).join("")}</div>`;
+  $("#mc-dna").innerHTML = `
+    <div class="box-head"><h3>DNA do canal</h3>${d.stale ? `<span class="tag fresh" title="Você mudou os vídeos modelados ou as correções: atualize">desatualizado</span>` : ""}</div>
+    ${x ? `<p class="dna-sum">${esc(x.summary)}</p>
+      <div class="dna-row"><span>Temas</span>${chips(x.themes)}</div>
+      <div class="dna-row"><span>Formatos</span>${chips(x.formats)}</div>
+      <div class="dna-row"><span>Ângulos</span>${chips(x.angles)}</div>
+      <div class="dna-row"><span>Público</span><p>${esc(x.audience)}</p></div>
+      <div class="dna-row"><span>Estilo dos títulos</span><p>${esc(x.title_style)}</p></div>`
+      : `<p class="dim small">É o que a IA entende do seu canal a partir dos vídeos que você modelou. ${d.modeled ? "Clique em Gerar." : "Adicione vídeos modelados primeiro."}</p>`}
+    <div class="dna-row"><span title="O que você escrever aqui vale mais do que o que a IA achou">Suas correções (valem como verdade)</span>
+      <textarea class="input dna-notes" id="dna-notes" placeholder="Ex.: meu canal NÃO fala de religião; foco em homens de 20 a 35 anos">${esc(d.notes)}</textarea></div>
+    <div class="dna-foot">
+      <button class="btn ghost sm" id="dna-save-notes">Salvar correções</button>
+      <button class="btn sm ${d.stale || !x ? "primary" : ""}" id="dna-build" ${d.modeled && state.aiEnabled ? "" : "disabled"} title="A IA relê os vídeos modelados e as suas correções">${x ? "Atualizar" : "Gerar DNA"} <span class="btn-note">· ~US$ 0,01</span></button>
+    </div>`;
+}
+
+function renderRun() {
+  const b = boldness();
+  $("#mc-run").innerHTML = `
+    <div class="grow"><h3>Próximos vídeos</h3><p id="mc-bold-tip">${esc(BOLD_TIP[b])}</p></div>
+    <div class="field"><span>Ousadia</span>
+      <div class="seg" id="mc-bold">${Object.keys(BOLD_TIP).map((k) => `<button data-v="${k}" class="${k === b ? "on" : ""}" title="${esc(BOLD_TIP[k])}">${esc(NX.boldness[k] || k)}</button>`).join("")}</div></div>
+    <button class="btn primary" id="nx-run" ${state.aiEnabled ? "" : "disabled"} title="Busca o que está em alta agora no nicho, monta o mapa de território e os próximos vídeos">
+      <svg viewBox="0 0 24 24"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/></svg>Montar mapa e próximos <span class="btn-note">· ~US$ 0,05</span></button>`;
+  bindSeg($("#mc-bold"), (v) => { try { localStorage.setItem("boldness", v); } catch {} $("#mc-bold-tip").textContent = BOLD_TIP[v]; });
+}
+
+const inQueue = (title) => NX.queue.find((x) => x.title.toLowerCase() === title.toLowerCase());
+const inModeled = (title) => NX.modeled.find((x) => (x.my_title || "").toLowerCase() === title.toLowerCase());
+const refThumbs = (refs, n = 3) => refs.slice(0, n).map((r) => `<img loading="lazy" src="https://i.ytimg.com/vi/${r.video_id}/mqdefault.jpg" alt="" data-vref="${r.video_id}" title="${esc(r.title)} · viralizou ${fmtMult(r.multiplier)} · há ${ageLong(r.age_days)}">`).join("");
+
+function renderNext() {
+  const d = NX.data;
+  if (!d) {
+    $("#mc-result").innerHTML = `<div class="box"><div class="empty"><b>Nenhuma rodada ainda</b>
+      Adicione os vídeos que você já modelou, escolha a ousadia e clique em <b>Montar mapa e próximos</b>.</div></div>`;
+    return;
+  }
+  const lvl = (c) => (c >= 60 ? "hi" : c >= 40 ? "mid" : "lo");
+  const col = (st) => {
+    const list = d.territories.filter((t) => t.status === st);
+    return `<div class="terr-col ${st}"><h4 title="${esc(TERR[st][1])}"><i></i>${TERR[st][0]}</h4>
+      ${list.length ? list.map((t) => `<div class="terr-card"><b>${esc(t.name)}<span class="heat ${t.heat}" title="Quanto está em alta">${t.heat === "alta" ? "em alta" : t.heat === "media" ? "morno" : "fraco"}</span></b>
+        <p>${esc(t.why)}</p><div class="terr-thumbs">${refThumbs(t.refs, 4)}</div></div>`).join("") : `<div class="terr-empty">Nada aqui agora.</div>`}</div>`;
+  };
+  $("#mc-result").innerHTML = `
+    <div class="nx-strategy"><span>A estratégia agora · ousadia ${esc(NX.boldness[d.boldness] || "")}</span><p>${esc(d.strategy)}</p></div>
+    <div class="nx-meta"><span title="Como a IA entendeu o seu nicho">Nicho: ${esc(d.niche)}</span>
+      <span>${fmtDate(d.created_at)} · ${d.pool.length} vídeos em alta analisados · ${fmtUSD(d.cost_usd)}</span></div>
+    ${d.territories.length ? `<div class="box" style="margin-bottom:12px"><div class="box-head"><h3>Mapa de território</h3><span class="dim small">o que está em alta no nicho, agrupado por assunto</span></div>
+      <div class="terr">${col("seu")}${col("fronteira")}${col("saturado")}</div></div>` : ""}
+    <div class="var-list">${d.items.map((it, i) => {
+      const q = inQueue(it.title), md = inModeled(it.title);
+      return `
+      <div class="var nx-item ${lvl(it.chance)}">
+        <div class="var-chance" title="Chance de viralizar (estimativa da IA com base nos vídeos em alta)"><b>${it.chance}%</b><i style="width:${it.chance}%"></i></div>
+        <div class="var-body">
+          <div class="var-title" data-copy="${esc(it.title)}" title="Clique para copiar">${i + 1}. ${esc(it.title)}</div>
+          <div><span class="tag k-${it.kind}" title="${esc(NX_KIND_TIP[it.kind] || "")}">${esc(NX.kinds[it.kind] || it.kind)}</span>
+            ${it.territory ? `<span class="tag terr-tag" title="Território do mapa">${esc(it.territory)}</span>` : ""}</div>
+          <div class="var-why">${esc(it.why)}</div>
+          ${it.hook ? `<div class="nx-hook" data-copy="${esc(it.hook)}" title="Clique para copiar o gancho">${esc(it.hook)}</div>` : ""}
+          ${it.refs.length ? `<div class="nx-refs">${it.refs.map((r) => `
+            <div class="nx-ref" data-vref="${r.video_id}" title="${esc(r.title)} · ${esc(r.channel_title || "")} · ${fmt(r.views)} views · postado há ${ageLong(r.age_days)}">
+              <img loading="lazy" src="https://i.ytimg.com/vi/${r.video_id}/mqdefault.jpg" alt=""><span>${esc(r.title)}</span><b class="${multClass(r.multiplier)}">${fmtMult(r.multiplier)}</b></div>`).join("")}</div>` : ""}
+          <div class="nx-actions">${md ? `<span class="tag new">Já fiz</span>` : q ? `<span class="tag neutral">Na sua fila</span>`
+            : `<button class="btn sm" data-nx-add="${i}" title="Coloca na sua fila (vou fazer)">+ Vou fazer</button>
+               <button class="btn ghost sm" data-nx-add="${i}" data-done="1" title="Marca que você já fez um vídeo assim (entra nos modelados)">Já fiz</button>`}</div>
+        </div>
+      </div>`;
+    }).join("")}</div>`;
+}
+
+function renderQueue() {
+  $("#mc-queue").innerHTML = `
+    <div class="box-head"><h3>Vou fazer</h3><span class="dim small">${NX.queue.length} na fila</span></div>
+    <form class="nx-add" id="nx-add"><input class="input" id="nx-add-title" placeholder="Adicionar um vídeo à fila…"><button class="btn sm" type="submit">Adicionar</button></form>
+    ${NX.queue.length ? NX.queue.map((x) => `<div class="q-item" data-qid="${x.id}">
+      <button class="q-check" data-q-done="${x.id}" title="Fiz! Vai para os vídeos modelados"><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></button>
+      <span class="q-title" ${x.video_id ? `data-vref="${x.video_id}" style="cursor:pointer"` : ""} title="${esc(x.note || x.title)}">${esc(x.title)}</span>
+      <button class="icon-btn" data-q-del="${x.id}" title="Tirar da fila"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>`).join("")
+      : `<p class="dim small">Nada na fila. Use "+ Vou fazer" nas sugestões.</p>`}`;
+}
+
+async function startNext() {
+  if (!state.profile) return toast("Escolha o perfil em uso primeiro.", "err");
+  try {
+    watchJob(await api("/api/next", { method: "POST", body: { profile_id: state.profile, boldness: boldness() } }));
+    toast("Montando o mapa e os próximos vídeos… (cerca de 1 minuto)");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+$("#nx-history").addEventListener("change", (e) => loadNext(+e.target.value));
+
+$("#page-next").addEventListener("click", async (e) => {
+  const t = e.target;
+  try {
+    if (t.closest("#nx-run")) return startNext();
+    const cp = t.closest("[data-copy]");
+    if (cp) { await navigator.clipboard.writeText(cp.dataset.copy); return toast("Copiado.", "ok"); }
+    const vr = t.closest("[data-vref]");
+    if (vr) return openPreview(vr.dataset.vref);
+    const add = t.closest("[data-nx-add]");
+    if (add) {
+      const it = NX.data.items[+add.dataset.nxAdd];
+      if (add.dataset.done) {
+        await api("/api/modeled", { method: "POST", body: { profile_id: state.profile, video: it.refs[0]?.video_id || null, my_title: it.title } });
+        toast("Entrou nos vídeos modelados.", "ok");
+      } else {
+        await api("/api/queue", { method: "POST", body: { profile_id: state.profile, title: it.title, kind: it.kind, note: it.why, video_id: it.refs[0]?.video_id || null } });
+      }
+      return loadNext(NX.data.id);
+    }
+    const qd = t.closest("[data-q-done]");
+    if (qd) { await api(`/api/queue/${qd.dataset.qDone}/done`, { method: "POST" }); toast("Feito! Entrou nos vídeos modelados.", "ok"); return loadNext(NX.data?.id); }
+    const qx = t.closest("[data-q-del]");
+    if (qx) { await api(`/api/queue/${qx.dataset.qDel}`, { method: "DELETE" }); return loadNext(NX.data?.id); }
+    const md = t.closest("[data-mdel]");
+    if (md) { await api(`/api/modeled/${md.dataset.mdel}`, { method: "DELETE" }); return loadNext(NX.data?.id); }
+    const mt = t.closest("[data-my-title]");
+    if (mt) {
+      const m = NX.modeled.find((x) => x.id === +mt.dataset.myTitle);
+      const v = prompt("Título que você usou no seu vídeo:", m.my_title || "");
+      if (v === null) return;
+      await api(`/api/modeled/${m.id}`, { method: "PATCH", body: { my_title: v } });
+      return loadNext(NX.data?.id);
+    }
+    if (t.closest("#dna-save-notes")) {
+      NX.dna = await api(`/api/dna/${state.profile}/notes`, { method: "POST", body: { notes: $("#dna-notes").value } });
+      toast("Correções salvas. Clique em Atualizar para a IA usar.", "ok");
+      return renderDNA();
+    }
+    const db_ = t.closest("#dna-build");
+    if (db_) {
+      db_.disabled = true; db_.textContent = "IA lendo os seus vídeos…";
+      NX.dna = await api(`/api/dna/${state.profile}`, { method: "POST" });
+      return renderDNA();
+    }
+  } catch (err) { toast(err.message, "err"); renderDNA(); }
+});
+
+$("#page-next").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    if (e.target.id === "mc-add") {
+      const link = $("#mc-link").value.trim(), mine = $("#mc-mine").value.trim();
+      if (!link && !mine) return;
+      const btn = $("button", e.target); btn.disabled = true; btn.textContent = "Buscando…";
+      await api("/api/modeled", { method: "POST", body: { profile_id: state.profile, video: link || null, my_title: mine || null } });
+      return loadNext(NX.data?.id);
+    }
+    if (e.target.id === "nx-add") {
+      const t = $("#nx-add-title").value.trim();
+      if (!t) return;
+      await api("/api/queue", { method: "POST", body: { profile_id: state.profile, title: t } });
+      return loadNext(NX.data?.id);
+    }
+  } catch (err) { toast(err.message, "err"); loadNext(NX.data?.id); }
+});
+
+// "Já modelei" (linhas de Descobertas e prévia): liga/desliga o vídeo na lista de modelados do perfil em uso.
+const modeledBtn = (id) => {
+  const on = state.modeled.has(id);
+  return `<button class="icon-btn ${on ? "on" : ""}" data-modeled="${id}" title="${on ? "Já modelado (clique para tirar de Meu canal)" : "Já modelei este: leva para Meu canal"}">
+    <svg viewBox="0 0 24 24"><path d="M4 18V8l8-5 8 5v10"/><path d="M9 21v-6h6v6"/>${on ? `<path d="M8.5 12l2.5 2.5 4.5-5"/>` : ""}</svg></button>`;
+};
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-modeled]");
+  if (!b) return;
+  e.stopPropagation();
+  if (!state.profile) return toast("Escolha o perfil em uso primeiro.", "err");
+  const id = b.dataset.modeled;
+  try {
+    if (state.modeled.has(id)) {
+      await api(`/api/modeled/${state.modeled.get(id)}`, { method: "DELETE" });
+      state.modeled.delete(id);
+      toast("Tirado de Meu canal.", "ok");
+    } else {
+      const r = await api("/api/modeled", { method: "POST", body: { profile_id: state.profile, video: id } });
+      state.modeled.set(id, r.id);
+      toast("Levado para Meu canal (vídeos que modelei).", "ok");
+    }
+    renderVideos();
+    if (!$("#pv").hidden && PV.id) renderPreview();
+    if ($("#page-next").classList.contains("active")) loadNext(NX.data?.id);
+  } catch (err) { toast(err.message, "err"); }
+}, true);

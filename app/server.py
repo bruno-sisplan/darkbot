@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import ai, analytics, chrome_profiles, config, db, jobs, malandro, research, titles, youtube_api, youtube_web
+from . import ai, analytics, chrome_profiles, config, db, jobs, malandro, proximos, research, titles, youtube_api, youtube_web
 from .paths import PROFILES_DIR, UI_DIR
 
 app = FastAPI(title="darkbot")
@@ -412,6 +412,149 @@ def video_variations(video_id: str, body: AnalyzeIn):
                                    refresh=body.refresh)
     except (ai.AIError, RuntimeError) as e:
         raise HTTPException(400, str(e))
+
+
+# ---------------------------------------------------------------- Meu canal (o "após": modelados, DNA, mapa, próximos)
+
+class ModeledIn(BaseModel):
+    profile_id: int
+    video: str | None = None      # link ou ID do vídeo original
+    my_title: str | None = None   # título que o editor usou (opcional)
+
+
+@app.get("/api/modeled")
+def modeled_list(profile_id: int):
+    return proximos.modeled(profile_id)
+
+
+@app.post("/api/modeled")
+def modeled_add(body: ModeledIn):
+    vid = youtube_web.parse_video_id(body.video) if body.video else None
+    if body.video and not vid:
+        raise HTTPException(400, "Link de vídeo inválido.")
+    try:
+        return {"id": proximos.modeled_add(body.profile_id, vid, body.my_title)}
+    except (ValueError, RuntimeError, youtube_api.YouTubeAPIError) as e:
+        raise HTTPException(400, str(e))
+
+
+class MyTitleIn(BaseModel):
+    my_title: str | None = None
+
+
+@app.patch("/api/modeled/{item_id}")
+def modeled_edit(item_id: int, body: MyTitleIn):
+    with db.tx() as con:
+        con.execute("UPDATE modeled SET my_title=? WHERE id=?", (" ".join((body.my_title or "").split()) or None, item_id))
+    return {"ok": True}
+
+
+@app.delete("/api/modeled/{item_id}")
+def modeled_delete(item_id: int):
+    with db.tx() as con:
+        con.execute("DELETE FROM modeled WHERE id=?", (item_id,))
+    return {"ok": True}
+
+
+@app.get("/api/dna")
+def dna_get(profile_id: int):
+    return proximos.dna_get(profile_id)
+
+
+@app.post("/api/dna/{profile_id}")
+def dna_build(profile_id: int):
+    """Refaz o DNA do canal a partir dos vídeos modelados (Sonnet, ~US$ 0,01)."""
+    if not ai.enabled():
+        raise HTTPException(400, "IA desligada (sem chave em Configurações).")
+    try:
+        return proximos.dna_build(profile_id)
+    except (ai.AIError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+
+class NotesIn(BaseModel):
+    notes: str = ""
+
+
+@app.post("/api/dna/{profile_id}/notes")
+def dna_notes(profile_id: int, body: NotesIn):
+    return proximos.dna_set_notes(profile_id, body.notes)
+
+
+class NextIn(BaseModel):
+    profile_id: int
+    boldness: str = "equilibrado"   # perto, equilibrado, ousado
+
+
+@app.post("/api/next")
+def next_run(body: NextIn):
+    """Mapa de território + próximos vídeos (buscas novas + IA). Roda em segundo plano; fica no histórico."""
+    if not ai.enabled():
+        raise HTTPException(400, "IA desligada (sem chave em Configurações).")
+    try:
+        return jobs.start("next", "Meu canal: próximos vídeos", proximos.run, body.profile_id, body.boldness,
+                          key=f"next:{body.profile_id}", cancellable=True).to_dict()
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/next")
+def next_list(profile_id: int):
+    runs = proximos.runs(profile_id)
+    return {"runs": runs, "latest": proximos.get(runs[0]["id"]) if runs else None, "kinds": proximos.KINDS,
+            "boldness": {k: v[0] for k, v in proximos.BOLDNESS.items()}}
+
+
+@app.get("/api/next/{run_id}")
+def next_get(run_id: int):
+    r = proximos.get(run_id)
+    if not r:
+        raise HTTPException(404, "Sugestão não encontrada.")
+    return r
+
+
+@app.delete("/api/next/{run_id}")
+def next_delete(run_id: int):
+    with db.tx() as con:
+        con.execute("DELETE FROM next_runs WHERE id=?", (run_id,))
+    return {"ok": True}
+
+
+class QueueIn(BaseModel):
+    profile_id: int
+    title: str
+    video_id: str | None = None
+    kind: str | None = None
+    note: str | None = None
+
+
+@app.get("/api/queue")
+def queue_list(profile_id: int):
+    return proximos.queue(profile_id)
+
+
+@app.post("/api/queue")
+def queue_add(body: QueueIn):
+    try:
+        return {"id": proximos.queue_add(body.profile_id, body.title, body.video_id, body.kind, body.note)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/queue/{item_id}/done")
+def queue_done(item_id: int):
+    """Fiz o vídeo da fila: vira um vídeo modelado."""
+    try:
+        return {"modeled_id": proximos.queue_done(item_id)}
+    except (ValueError, RuntimeError, youtube_api.YouTubeAPIError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/queue/{item_id}")
+def queue_delete(item_id: int):
+    with db.tx() as con:
+        con.execute("DELETE FROM queue WHERE id=?", (item_id,))
+    return {"ok": True}
 
 
 class HideIn(BaseModel):

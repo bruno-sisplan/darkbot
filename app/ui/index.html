@@ -26,6 +26,9 @@
       <button class="nav-item active" data-page="videos">
         <svg viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-8"/><path d="M14 8h6v6"/></svg>Descobertas
       </button>
+      <button class="nav-item" data-page="next" title="O lado do 'e depois': o darkbot usa os vídeos que você já modelou para dizer o próximo passo">
+        <svg viewBox="0 0 24 24"><path d="M4 18V8l8-5 8 5v10"/><path d="M9 21v-6h6v6"/><path d="M4 21h16"/></svg>Meu canal
+      </button>
       <button class="nav-item" data-page="channels">
         <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="4"/><path d="M10 9.5v5l4-2.5z"/></svg>Canais
       </button>
@@ -272,6 +275,30 @@
       <div class="research">
         <div class="r-list" id="r-list"></div>
         <div class="r-detail" id="r-detail"></div>
+      </div>
+    </section>
+
+    <!-- Meu canal: o "após". Descobertas é o lado certo (de onde partir); aqui é o próximo passo e o diferente. -->
+    <section class="page" id="page-next">
+      <header class="page-head">
+        <div>
+          <h1>Meu canal</h1>
+          <p class="muted">Descobertas mostra de onde partir. Aqui o darkbot usa os vídeos que você já modelou para dizer o próximo passo e o que dá para fazer de diferente no mesmo assunto.</p>
+        </div>
+        <div class="head-actions">
+          <select id="nx-history" class="select" title="Rodadas feitas antes"></select>
+        </div>
+      </header>
+      <div class="mc-layout">
+        <div class="mc-main">
+          <div class="box" id="mc-modeled"></div>
+          <div class="box mc-run" id="mc-run"></div>
+          <div id="mc-result"></div>
+        </div>
+        <aside class="mc-side">
+          <div class="box" id="mc-dna"></div>
+          <div class="box" id="mc-queue"></div>
+        </aside>
       </div>
     </section>
 
