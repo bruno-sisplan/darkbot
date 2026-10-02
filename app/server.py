@@ -159,6 +159,22 @@ def garimpo_start(pid: int, body: GarimpoIn):
     return job.to_dict()
 
 
+@app.post("/api/profiles/{pid}/niche-check")
+def niche_check_start(pid: int):
+    """Confere com a IA se os vídeos do perfil são do nicho dele (só os ainda não conferidos)."""
+    if not db.row("SELECT 1 FROM profiles WHERE id=?", (pid,)):
+        raise HTTPException(404, "Perfil não encontrado.")
+
+    def run(job):
+        n = research.niche_check(job, pid)
+        job.update(1.0, f"Nicho conferido em {n} vídeos")
+        return {"note": f"Nicho conferido em {n} vídeos."}
+    try:
+        return jobs.start("niche", "Conferindo o nicho", run, key=f"niche:{pid}").to_dict()
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
 @app.post("/api/profiles/{pid}/collect")
 def collect(pid: int, body: CollectIn):
     p = db.row("SELECT name FROM profiles WHERE id=?", (pid,))
@@ -166,7 +182,7 @@ def collect(pid: int, body: CollectIn):
         raise HTTPException(404, "Perfil não encontrado.")
     try:
         job = jobs.start(
-            "collect", f"{'Histórico' if body.source == 'history' else 'Coletando'} · {p['name']}", jobs.collect, pid,
+            "collect", f"{'Histórico' if body.source == 'history' else 'Coletando'} · {p['name']}", research.collect_and_check, pid,
             max(1, min(body.scrolls, config.MAX_SCROLLS)), body.show_browser,
             "history" if body.source == "history" else "home", key=f"profile:{pid}",
             cancellable=True,

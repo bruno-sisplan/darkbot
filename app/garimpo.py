@@ -338,6 +338,7 @@ def run(job: jobs.Job, profile_id: int, seed: str, mode: str, show_browser: bool
                         (jobs.now_iso(), len(found), run_id))
         if found and not job.stopped():
             jobs.check_ai_labels(job, lo=0.82, hi=0.86)
+            research.niche_check(job, profile_id, list(found))   # mesma régua de nicho do resto de Descobrir
 
         # ---------------------------------------------------------------- 4. a home, já aquecida
         home = None
@@ -345,7 +346,7 @@ def run(job: jobs.Job, profile_id: int, seed: str, mode: str, show_browser: bool
             job.update(0.87, "Coletando a home do perfil (já aquecida no nicho)...")
             time.sleep(2)   # o Chrome solta o perfil um instante depois de fechar
             try:
-                home = jobs.collect(job, profile_id, HOME_SCROLLS, show_browser, "home")
+                home = research.collect_and_check(job, profile_id, HOME_SCROLLS, show_browser, "home")
             except Exception as e:   # o garimpo já está salvo; a home é um extra
                 note = f"A coleta da home no fim falhou: {e}"
         msg = (f"Garimpo de \"{label[:60]}\": {len(watched)} vídeos assistidos, {len(visited)} canais visitados, "

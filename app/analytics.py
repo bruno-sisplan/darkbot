@@ -80,13 +80,39 @@ def _decorate(data: list[dict]) -> list[dict]:
     return data
 
 
+def niche_examples(profile_id: int) -> list[str]:
+    """Vídeos que o editor já usou como referência neste perfil (pesquisas a partir de vídeo e vídeos que modelou):
+    são os exemplos do que ELE considera o nicho."""
+    titles = [r["label"] for r in db.rows(
+        "SELECT label FROM research WHERE profile_id=? AND kind='video' AND label IS NOT NULL ORDER BY id DESC LIMIT 8",
+        (profile_id,))]
+    try:
+        titles += [r["title"] for r in db.rows(
+            "SELECT title FROM modeled WHERE profile_id=? AND title IS NOT NULL ORDER BY id DESC LIMIT 8", (profile_id,))]
+    except Exception:
+        pass
+    return list(dict.fromkeys(t for t in titles if t))[:12]
+
+
+def niche_key(profile_id: int) -> str:
+    """Chave da conferência de nicho: o texto do nicho + os exemplos (mudar qualquer um refaz a conferência)."""
+    import hashlib
+    p = db.row("SELECT niche FROM profiles WHERE id=?", (profile_id,))
+    niche = ((p or {}).get("niche") or "").strip()
+    ex = niche_examples(profile_id)
+    return niche + ("|" + hashlib.sha1("\n".join(sorted(ex)).encode()).hexdigest()[:8] if ex else "")
+
+
 def videos(profile_id: int | None = None, run_id: int | None = None, source: str | None = None,
            include_hidden: bool = False) -> list[dict]:
     where, params = "WHERE v.is_short = 0", []
     if not include_hidden:
         where += " AND COALESCE(v.hidden, 0) = 0"
+    niche_join, niche_params = "", []
     if profile_id:
         where, params = where + " AND r.profile_id = ?", params + [profile_id]
+        niche_join = "LEFT JOIN niche_fit nf ON nf.video_id = v.video_id AND nf.profile_id = ? AND nf.niche = ?"
+        niche_params = [profile_id, niche_key(profile_id)]
     if run_id:
         where, params = where + " AND r.id = ?", params + [run_id]
     if source:
@@ -96,14 +122,16 @@ def videos(profile_id: int | None = None, run_id: int | None = None, source: str
                    COUNT(DISTINCT s.run_id) AS times_seen, MIN(s.position) AS best_position,
                    MIN(r.started_at) AS first_seen, MAX(r.started_at) AS last_seen,
                    GROUP_CONCAT(DISTINCT r.profile_id) AS profile_ids,
-                   GROUP_CONCAT(DISTINCT COALESCE(r.source, 'home')) AS sources
+                   GROUP_CONCAT(DISTINCT COALESCE(r.source, 'home')) AS sources,
+                   {"MAX(nf.fit)" if niche_join else "NULL"} AS niche_fit
             FROM sightings s
             JOIN runs r ON r.id = s.run_id
             JOIN videos v ON v.video_id = s.video_id
             LEFT JOIN channels c ON c.channel_id = v.channel_id
+            {niche_join}
             {where}
             GROUP BY v.video_id""",
-        params,
+        niche_params + params,
     )
     for v in _decorate(data):
         v["profile_ids"] = [int(x) for x in (v["profile_ids"] or "").split(",") if x]

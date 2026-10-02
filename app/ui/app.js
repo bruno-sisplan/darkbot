@@ -316,11 +316,15 @@ async function loadVideos() {
   renderVideos();
 }
 
+// Perfil com nicho definido: em "Só o que viraliza agora", só entra o que a IA confirmou como do nicho (nota 2 ou 3).
+const nicheOn = () => { const p = currentProfile(); return !!(p && p.kind !== "coringa" && p.niche); };
 function filteredVideos() {
   const onlyParams = segValue($("#v-mode")) === "params";
   const q = $("#v-search").value.trim().toLowerCase();
+  const niche = nicheOn();
   return state.videos.filter((v) => {
     if (onlyParams && !passesViral(v)) return false;
+    if (onlyParams && niche && !(v.niche_fit >= 2)) return false;
     if (q && !`${v.title} ${v.channel_title}`.toLowerCase().includes(q)) return false;
     return true;
   });
@@ -344,6 +348,7 @@ function renderVideos() {
     if (v.sources && v.sources.includes("research")) tags.push(`<span class="tag via" title="Veio de uma pesquisa">Pesquisa</span>`);
     if (v.sources && v.sources.includes("garimpo")) tags.push(`<span class="tag via" title="Achado no garimpo: o darkbot assistiu no perfil e entrou nos sugeridos e nos canais do nicho">Garimpo</span>`);
     tags.push(...newTags(v));
+    if (v.niche_fit != null && v.niche_fit < 2 && nicheOn()) tags.unshift(`<span class="tag warn" title="A IA conferiu: não é do nicho do perfil (${esc(currentProfile()?.niche || "")})">Fora do nicho</span>`);
     return `<tr class="clickable" data-id="${v.video_id}">
       <td><div class="thumb"><img loading="lazy" src="https://i.ytimg.com/vi/${v.video_id}/mqdefault.jpg" alt="">
         ${v.duration_s != null ? `<span class="dur">${fmtDur(v.duration_s)}</span>` : ""}</div></td>
@@ -368,11 +373,18 @@ function renderVideos() {
     empty.hidden = false;
   } else if (!list.length) {
     empty.innerHTML = segValue($("#v-mode")) === "params"
-      ? `<b>Nenhum vídeo bate os seus parâmetros agora</b>Pesquise um assunto (ou cole um vídeo) na barra acima, veja <span class="link" data-vmode="all">Tudo</span> ou afrouxe os parâmetros em <span class="link" data-goto="settings">Configurações</span>.`
+      ? `<b>Nenhum vídeo do nicho bate os seus parâmetros agora</b>Pesquise um assunto (ou cole um vídeo) na barra acima, veja <span class="link" data-vmode="all">Tudo</span> ou afrouxe os parâmetros em <span class="link" data-goto="settings">Configurações</span>.`
       : `<b>Nenhum vídeo com esses filtros</b>Apague a busca para ver mais vídeos.`;
     empty.hidden = false;
   } else empty.hidden = true;
 
+  // Vídeos que batem a régua mas ainda não foram conferidos com o nicho do perfil (coletas antigas).
+  const unchecked = nicheOn() ? state.videos.filter((v) => v.niche_fit == null && passesViral(v)).length : 0;
+  const nb = $("#v-niche");
+  nb.hidden = !unchecked;
+  if (unchecked) nb.innerHTML = `<span><b>${unchecked}</b> vídeos que viralizam ainda não foram conferidos com o nicho do perfil
+    (<b>${esc(currentProfile().niche)}</b>) e estão escondidos.</span>
+    <button class="btn sm" id="v-niche-go" ${state.aiEnabled ? "" : "disabled"}>Conferir com o nicho <span class="btn-note">· ~US$ ${Math.max(0.01, unchecked * 0.00006).toFixed(2).replace(".", ",")}</span></button>`;
   $("#v-more").hidden = list.length <= state.vLimit;
   $("#v-more").textContent = `Mostrar mais (${list.length - shown.length} restantes)`;
   renderKpis(list);
@@ -401,6 +413,13 @@ $("#v-source").addEventListener("change", loadVideos);
 $("#v-run").addEventListener("change", loadVideos);
 $("#v-more").addEventListener("click", () => { state.vLimit += 150; renderVideos(); });
 bindSeg($("#v-mode"), renderVideos);
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("#v-niche-go");
+  if (!b || !state.profile) return;
+  b.disabled = true;
+  try { watchJob(await api(`/api/profiles/${state.profile}/niche-check`, { method: "POST" })); toast("Conferindo o nicho… (uns 20 segundos)"); }
+  catch (err) { toast(err.message, "err"); b.disabled = false; }
+});
 document.addEventListener("click", (e) => { if (e.target.closest("[data-vmode]")) $('#v-mode [data-v="all"]').click(); });
 $("#v-search").addEventListener("input", renderVideos);
 $("#v-profile").addEventListener("change", loadVideos);

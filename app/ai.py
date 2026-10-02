@@ -546,13 +546,14 @@ def localize_queries(queries: list[str], langs: list[str]) -> dict[str, list[str
 
 _LEARN_SYSTEM = """Você é um pesquisador de mercado sênior de canais dark do YouTube. Recebe o que o editor procura, as
 buscas que já foram feitas e títulos de vídeos do nicho que estão VIRALIZANDO AGORA (com idioma e views por hora).
-Faça o que um bom pesquisador faz ao ver o que está funcionando: pesquise MAIS disso, abrindo o leque.
+Faça o que um bom pesquisador faz ao ver o que está funcionando: pesquise MAIS DISSO, dentro do MESMO ASSUNTO.
 
 - items: até {n} buscas NOVAS, de 2 a 6 palavras, cada uma no idioma do público que ela deve achar (lang = um destes
-  códigos: {langs}). Tire dos títulos os termos, premissas, personagens, lugares, objetos e formatos que se repetem
-  nos que mais ganham views por hora e que AINDA NÃO foram buscados. Misture: premissas concretas que estão
-  funcionando, subtemas vizinhos que o mesmo público assiste e o jeito como o público escreve. Não repita nem
-  reformule as buscas já feitas. Sem nome de canal, sem aspas, sem hashtag."""
+  códigos: {langs}). TODA busca cita o assunto específico do editor (o grupo, o objeto, o lugar: ex. "amish",
+  "menonitas", "trator chinês"). Tire dos títulos que mais ganham views por hora os termos, premissas, lugares e
+  formatos que se repetem e AINDA NÃO foram buscados. NUNCA generalize para categorias amplas ou assuntos parecidos
+  (ex.: de "amish" para "comunidades religiosas", "povos indígenas", "migração"): isso traz vídeo fora do nicho.
+  Não repita nem reformule as buscas já feitas. Sem nome de canal, sem aspas, sem hashtag."""
 
 
 class LangQ(BaseModel):
@@ -573,7 +574,7 @@ def learn_queries(topic: str, done: list[str], titles: list[tuple[str, str, int]
                       "Viralizando agora (idioma | views por hora | título):"]
                      + [f"- {l} | {vph} | {' '.join(t.split())[:110]}" for l, t, vph in titles[:30]])
     target = hashlib.sha1((system + user).encode()).hexdigest()[:20]
-    res = _run("learn:v1", target, config.AI_MODEL_FAST, system, user, LangQList, max_tokens=40 * n + 200)
+    res = _run("learn:v2", target, config.AI_MODEL_FAST, system, user, LangQList, max_tokens=40 * n + 200)
     seen = {d.lower() for d in done}
     out = []
     for it in res["items"]:
@@ -588,7 +589,7 @@ def learn_queries(topic: str, done: list[str], titles: list[tuple[str, str, int]
 # Perfil do vídeo-semente: tema, ângulo e variações do título (Haiku)
 # ---------------------------------------------------------------------------
 
-SEED_KIND = "seed:v2"
+SEED_KIND = "seed:v3"
 
 _SEED_SYSTEM = """Você é um pesquisador de mercado sênior de canais dark do YouTube. Recebe um vídeo de referência que o
 editor quer MODELAR e prepara a caça aos concorrentes diretos (outros canais que fizeram o mesmo vídeo trocando detalhes).
@@ -601,10 +602,12 @@ Responda:
 - topic: 1 a 2 frases em português dizendo exatamente que vídeo conta como concorrente direto (tema + formato +
   premissa). É o critério do filtro de relevância: inclua as variações da premissa, exclua o que só divide o tema.
 - queries: 6 buscas curtas (2 a 6 palavras) NO IDIOMA DO VÍDEO, como o público digita: 2 da premissa, 2 do tema
-  central e 2 com termos populares do nicho. Sem nome de canal, sem aspas.
+  central e 2 com termos populares do nicho. TODA busca cita o assunto específico (ex.: "amish", "trator chinês");
+  nada de categoria ampla ("comunidades tradicionais", "pressão econômica"). Sem nome de canal, sem aspas.
 - variants: 8 títulos-variação NO IDIOMA DO VÍDEO que mantêm a estrutura e a premissa do original mas trocam os
   detalhes, variando os eixos (quem faz, o objeto, o país/marca rival, o número, a época), como os canais que
-  modelam esse vídeo fariam. Pelo menos 2 devem inverter os papéis (quem desmonta vira quem é desmontado).
+  modelam esse vídeo fariam. Pelo menos 2 devem inverter os papéis (quem desmonta vira quem é desmontado). O assunto
+  central continua o mesmo (trocar "amish" por "menonitas" vale; por "comunidades agrícolas" ou "indígenas", não).
   Ex.: "American Engineers Tore Down a Chinese Tractor - What They Found Inside" ->
   "Japanese Engineers Tore Down an American Tractor", "German Engineers Took Apart a Chinese Excavator",
   "Engineers Tore Down a Chinese Electric Car - What They Found Inside"."""

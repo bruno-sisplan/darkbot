@@ -263,7 +263,10 @@ def _context(profile_id: int) -> tuple[list[str], set[str], set[str]]:
     seen |= {x["video_id"] for x in q if x["video_id"]}
 
     # O que já viraliza em Descobrir (coletas e pesquisas do perfil) entra como candidato, junto com as buscas novas.
-    hot = [v for v in viral.rank([v for v in analytics.videos(profile_id) if viral.passes(v)]) if v["video_id"] not in seen]
+    # (fora do nicho conferido pela IA não entra: nota de nicho < 2)
+    hot = [v for v in viral.rank([v for v in analytics.videos(profile_id) if viral.passes(v)
+                                  and not (v.get("niche_fit") is not None and v["niche_fit"] < 2)])
+           if v["video_id"] not in seen]
 
     rs = db.rows("SELECT id, label, topic FROM research WHERE profile_id=? AND status<>'error' ORDER BY id DESC LIMIT 8",
                  (profile_id,))

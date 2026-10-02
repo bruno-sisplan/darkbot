@@ -517,6 +517,31 @@ YouTube: no 1º teste o botão ficou na tela o tempo todo). Anúncio não puláv
 até 120 s a mais de espera por rodada (`WATCH_EXTRA_S`). O fim do garimpo diz quantos anúncios apareceram e foram pulados.
 Teste: 4 vídeos juntos, meta 30 s: 3 anúncios, 3 pulados, 45 s no total.
 
+**Descobrir só com o nicho do perfil (02/10/2026):** o usuário reclamou que os mais viralizados de Descobrir "não têm
+nada a ver com o nicho do perfil" (perfil "Canal Amish", nicho "amish"). Diagnóstico nos dados dele: dos 84 que batiam
+a régua, quase todos vinham da coleta da HOME no fim do garimpo (perfil ainda frio: CNN Brasil, política, Chaves, Arca
+de Noé) e das pesquisas que "abriam o leque" demais (buscas aprendidas e variações viraram "comunidades agrícolas",
+"testigos de Jehová", "rarámuris"; nota 1 indo para Descobrir). Nada conferia se o vídeo era do NICHO do perfil.
+- **Conferência de nicho por perfil** (`research.niche_check`, tabela `niche_fit(profile_id, video_id, niche, fit)`,
+  juiz `rel:v3`): critério `research.niche_topic` = o nicho é o ASSUNTO (nota 2 = qualquer vídeo cujo assunto principal é
+  o nicho, qualquer premissa; variação equivalente vale, ex. amish ↔ menonitas; título que trata do nicho = no mínimo 2);
+  nota 3 = a premissa dos vídeos que o editor já usa como referência (`analytics.niche_examples`: pesquisas a partir de
+  vídeo + modelados). A chave (`analytics.niche_key`) = nicho + hash dos exemplos (mudar refaz). Perfil coringa ou sem
+  nicho: não confere.
+- Roda sozinho no fim de toda coleta (`research.collect_and_check`, usado pela rota de coleta e pelo garimpo), dos
+  achados do garimpo e de toda pesquisa enviada a Descobrir. Para o que já estava no banco: aviso em Descobrir
+  "N vídeos ainda não conferidos com o nicho… [Conferir com o nicho]" (`POST /api/profiles/{id}/niche-check`; nada
+  gasta sem o editor pedir).
+- Descobrir, modo "Só o que viraliza agora": perfil com nicho mostra só nota ≥ 2. Modo "Tudo": marcação "Fora do
+  nicho". Próximos vídeos também ignora o que a conferência marcou fora do nicho.
+- Pesquisa sem fugir do assunto: Descobrir recebe só nota ≥ 2 (a nota 1 voltou a ficar de fora); nota 2 = mesmo
+  assunto com outra premissa ou variação equivalente (não mais "temas vizinhos"); buscas aprendidas (`learn:v2`) e
+  buscas/variações da semente (`seed:v3`) sempre citam o assunto específico, sem generalizar para categorias amplas.
+- Teste (cópia do banco do usuário, perfil Canal Amish, 278 vídeos, US$ 0,02): 1ª versão do critério usava os
+  exemplos como critério inteiro e deixava "comida amish" com nota 0; corrigido para "o nicho é o assunto". Resultado:
+  90 de 95 títulos com amish/menonita com nota ≥ 2, 179 fora do nicho cortados; dos 41 que batem a régua, 5 são do
+  nicho (os outros eram a home fria).
+
 **Pendente com o usuário:**
 - Mandar o .exe para o colega e ver se funciona no PC dele (o `.exe` atual foi gerado ANTES da mensagem nova de "home vazia": gerar de novo antes de mandar).
 - As chaves da OpenAI e da Anthropic apareceram no chat de desenvolvimento: recomendado gerar chaves novas nos painéis.

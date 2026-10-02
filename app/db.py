@@ -113,6 +113,15 @@ CREATE TABLE IF NOT EXISTS comments (
     published_at TEXT
 );
 
+-- O vídeo é do NICHO do perfil? (juiz da IA, uma vez por perfil + vídeo + texto do nicho; mudar o nicho refaz)
+CREATE TABLE IF NOT EXISTS niche_fit (
+    profile_id INTEGER,
+    video_id   TEXT,
+    niche      TEXT,
+    fit        INTEGER,          -- 3 mesma premissa, 2 mesmo nicho, 1 área ampla, 0 nada a ver
+    PRIMARY KEY (profile_id, video_id, niche)
+);
+
 -- Método Malandro: em que línguas ninguém fez este vídeo ainda (resultado completo em JSON, um por vídeo).
 CREATE TABLE IF NOT EXISTS malandro (
     video_id   TEXT PRIMARY KEY,
@@ -294,6 +303,7 @@ def purge_orphans(con: sqlite3.Connection) -> dict:
     con.execute(f"DELETE FROM videos WHERE {orphan}")
     con.execute("DELETE FROM video_stats WHERE video_id NOT IN (SELECT video_id FROM videos)")
     con.execute("DELETE FROM comments WHERE video_id NOT IN (SELECT video_id FROM videos)")
+    con.execute("DELETE FROM niche_fit WHERE video_id NOT IN (SELECT video_id FROM videos)")
     ch = con.execute("""DELETE FROM channels WHERE channel_id NOT IN
                         (SELECT channel_id FROM videos WHERE channel_id IS NOT NULL)""").rowcount
     con.executemany("DELETE FROM ai_results WHERE target = ?", [(f"video:{v}",) for v in gone])

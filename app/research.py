@@ -47,11 +47,73 @@ def _vph(m: dict | None) -> float:
 
 
 def _judge_topic(prof: dict, extra: str = "") -> str:
-    """Critério do juiz em dois níveis: a premissa (nota 3) e o NICHO inteiro (nota 2), para não deixar para trás
-    o que o mesmo público assiste com outro assunto ou premissa."""
+    """Critério do juiz em dois níveis: a premissa (nota 3) e o MESMO ASSUNTO com outra premissa (nota 2).
+    Só "o mesmo público até assiste" não basta (era isso que enchia Descobrir de coisa fora do nicho)."""
     return (f"NOTA 3 (concorrente direto): {prof['topic']} (premissa: {prof['angle']}; formato: {prof['format']}). "
-            f"NOTA 2 (mesmo nicho): qualquer vídeo de {prof['theme']} ou de temas vizinhos que o MESMO público assiste, "
-            f"mesmo com outra premissa ou outro formato. {extra}").strip()
+            f"NOTA 2 (mesmo nicho): vídeo sobre o MESMO ASSUNTO ({prof['theme']}) com outra premissa ou outro formato, ou "
+            f"sobre uma variação equivalente que o público do nicho trata como a mesma coisa (ex.: amish e menonitas). "
+            f"Assunto diferente que só lembra o tema (outro grupo sem relação, outro objeto, notícia geral) = 1 ou 0. "
+            f"{extra}").strip()
+
+
+def niche_topic(niche: str, examples: list[str]) -> str:
+    """Critério do juiz para o nicho de um PERFIL. O nicho é o ASSUNTO (ex.: amish): qualquer vídeo cujo assunto
+    principal é esse vale nota 2, seja qual for a premissa. Os vídeos que o editor já usou como referência só definem a
+    nota 3 (antes eles viravam o critério inteiro e "comida amish" ficava fora de um nicho "amish")."""
+    ex = "; ".join(f"\"{t}\"" for t in examples[:12])
+    return (f"O NICHO do perfil é o assunto: {niche}. "
+            f"NOTA 3: mesmo assunto E mesma premissa/formato dos vídeos que o editor já usa como referência"
+            + (f" ({ex})" if ex else "") + ". "
+            f"NOTA 2: QUALQUER vídeo cujo assunto principal é {niche}, com qualquer premissa (vida, costumes, comida, casa, "
+            f"trabalho, história, curiosidades, notícias), ou sobre uma variação equivalente que o público desse nicho trata "
+            f"como a mesma coisa (ex.: amish e menonitas). "
+            f"Se o título trata de {niche} (ou da variação equivalente), a nota é no mínimo 2, mesmo que o canal seja de "
+            f"pessoa. NOTA 1: só lembra o assunto (outro grupo, lugar ou objeto parecido, sem ser {niche}). "
+            f"NOTA 0: outro assunto.")
+
+
+def niche_check(job: jobs.Job | None, profile_id: int, video_ids: list[str] | None = None) -> int:
+    """Confere com a IA se os vídeos são do NICHO do perfil (uma vez por vídeo). Perfil coringa ou sem nicho: nada."""
+    p = db.row("SELECT kind, niche FROM profiles WHERE id=?", (profile_id,))
+    niche = ((p or {}).get("niche") or "").strip()
+    if not p or p["kind"] == "coringa" or not niche or not ai.enabled():
+        return 0
+    key = analytics.niche_key(profile_id)   # o nicho + os exemplos: mudar qualquer um refaz a conferência
+    if video_ids is None:
+        video_ids = [r["video_id"] for r in db.rows(
+            "SELECT DISTINCT s.video_id FROM sightings s JOIN runs r ON r.id = s.run_id WHERE r.profile_id = ?", (profile_id,))]
+    done = {r["video_id"] for r in db.rows("SELECT video_id FROM niche_fit WHERE profile_id=? AND niche=?",
+                                           (profile_id, key))}
+    todo = [v for v in dict.fromkeys(video_ids) if v not in done]
+    if not todo:
+        return 0
+    rows = db.rows(f"""SELECT v.video_id, v.title, v.channel_title, v.duration_s FROM videos v
+                       WHERE v.title IS NOT NULL AND v.is_short = 0 AND v.video_id IN ({','.join('?' * len(todo))})""", todo)
+    if not rows:
+        return 0
+    if job:
+        job.update(None, f"IA conferindo se {len(rows)} vídeos são do nicho do perfil ({niche})...")
+    notes = ai.judge_relevance(niche_topic(niche, analytics.niche_examples(profile_id)), [
+        (r["video_id"], r["title"], f"{(r['channel_title'] or '?')[:40]} | {round((r['duration_s'] or 0) / 60)} min")
+        for r in rows])
+    with db.tx() as con:
+        con.executemany("INSERT OR REPLACE INTO niche_fit(profile_id, video_id, niche, fit) VALUES(?,?,?,?)",
+                        [(profile_id, r["video_id"], key, notes.get(r["video_id"], 0)) for r in rows])
+    return len(rows)
+
+
+def collect_and_check(job: jobs.Job, profile_id: int, scrolls: int, show_browser: bool, source: str = "home") -> dict:
+    """Coleta (home ou histórico) + confere o nicho do que veio (a home de um perfil frio traz de tudo)."""
+    res = jobs.collect(job, profile_id, scrolls, show_browser, source)
+    if not job.stopped():
+        ids = [r["video_id"] for r in db.rows("SELECT video_id FROM sightings WHERE run_id=?", (res["run_id"],))]
+        try:
+            n = niche_check(job, profile_id, ids)
+            if n:
+                res["note"] = ((res.get("note") or "") + f" Nicho conferido em {n} vídeos.").strip()
+        except ai.AIError as e:
+            print(f"[coleta] conferir nicho: {e}")
+    return res
 
 
 def _known_not_dark(channel_ids: set) -> set:
@@ -443,9 +505,9 @@ def send_to_discoveries(research_id: int) -> dict:
     """A pesquisa vira uma coleta (marcada como pesquisa) do perfil dela: os vídeos do tema aparecem em Descobrir,
     onde os parâmetros de viral do editor filtram e ordenam. Refazer atualiza a mesma coleta."""
     r = db.row("SELECT * FROM research WHERE id=?", (research_id,))
-    # Abrangente: tudo o que o juiz achou do nicho (nota 1 = mesma área, outro tema) vai para Descobrir, onde os
-    # parâmetros de viral e o "só dark" filtram. Muitas oportunidades boas são do nicho sem ser o mesmo assunto.
-    good = {v["video_id"] for v in analytics.research_videos(research_id) if (v.get("relevance") or 2) >= 1}
+    # Só o mesmo nicho (nota 2 = mesmo assunto, 3 = mesma premissa). Nota 1 ("só lembra o tema") enchia Descobrir
+    # de coisa fora do nicho.
+    good = {v["video_id"] for v in analytics.research_videos(research_id) if (v.get("relevance") or 2) >= 2}
     vids = [v for v in db.rows("SELECT video_id, position FROM research_videos WHERE research_id=? ORDER BY position",
                                (research_id,)) if v["video_id"] in good]
     old = db.row("SELECT id FROM runs WHERE research_id=?", (research_id,))
@@ -461,6 +523,11 @@ def send_to_discoveries(research_id: int) -> dict:
                 "VALUES(?, ?, ?, 'done', 1, ?, 'research', ?)", (r["profile_id"], ts, ts, len(vids), research_id)).lastrowid
         con.executemany("INSERT OR IGNORE INTO sightings(run_id, video_id, position, surface) VALUES(?,?,?, 'research')",
                         [(run_id, v["video_id"], i) for i, v in enumerate(vids, 1)])
+    if r["profile_id"] and vids:
+        try:
+            niche_check(None, r["profile_id"], [v["video_id"] for v in vids])
+        except ai.AIError as e:
+            print(f"[pesquisa] conferir nicho: {e}")
     return {"run_id": run_id, "videos": len(vids), "existing": bool(old)}
 
 
