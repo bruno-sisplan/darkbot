@@ -340,7 +340,7 @@ tr:hover .row-del { opacity: 1; }
 .row-del:hover { color: var(--accent-2); }
 
 /* ---------------------------------------------------------------- tarefas + toasts */
-.jobs { position: fixed; right: 18px; bottom: 18px; display: grid; gap: 8px; width: 320px; z-index: 40; }
+.jobs { position: fixed; right: 18px; bottom: 18px; display: grid; gap: 8px; width: 320px; z-index: 55; }
 .job { background: var(--surface-2); border: 1px solid var(--line-2); border-radius: var(--r); padding: 12px 14px; box-shadow: var(--shadow); animation: fade .2s var(--ease); }
 .job-top { display: flex; justify-content: space-between; font-size: 12.5px; font-weight: 600; }
 .job-msg { font-size: 11.5px; color: var(--text-2); margin: 3px 0 9px; }
@@ -893,3 +893,31 @@ b.vph { color: var(--good); font-weight: 700; }
 /* Aviso: vídeos ainda não conferidos com o nicho do perfil */
 .niche-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
   padding: 10px 14px; border-radius: var(--r); background: var(--warn-soft); border: 1px solid rgba(251, 169, 76, .3); font-size: 12.5px; }
+
+.mal-dub { margin: 10px 0 0; line-height: 1.5; }
+.mal-dub .flag { vertical-align: -2px; }
+.paises-none { padding: 12px 14px; border-radius: var(--r); background: var(--bg-2); border: 1px dashed var(--line-2); font-size: 12.5px; color: var(--text-2); line-height: 1.5; margin-bottom: 8px; }
+.paises-none b { display: block; color: var(--text); margin-bottom: 2px; }
+
+.warn-txt { color: var(--warn); font-weight: 600; }
+
+.v-widen { margin: 0 0 10px; }
+
+/* ---------------------------------------------------------------- radar do zero */
+.radar-meta { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 4px 0 8px; }
+.radar-n { padding: 14px 16px; border-radius: var(--r-lg); background: var(--surface); border: 1px solid var(--line); margin-top: 10px; }
+.radar-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.radar-h b { font-size: 14px; }
+.radar-what { margin: 6px 0 8px; font-size: 12.5px; color: var(--text-2); line-height: 1.5; }
+.radar-nums { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--text-3); }
+.radar-nums b { color: var(--text); font-size: 13px; }
+.radar-nums b.vph { color: var(--good); }
+.radar-why { margin: 8px 0; font-size: 12.5px; line-height: 1.5; }
+.radar-vids { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.radar-v { position: relative; cursor: pointer; border-radius: var(--r-sm); overflow: hidden; }
+.radar-v img { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; transition: transform .25s var(--ease); }
+.radar-v:hover img { transform: scale(1.05); }
+.radar-v span { position: absolute; left: 4px; bottom: 4px; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: var(--pill); background: rgba(0, 0, 0, .8); color: var(--good); }
+.radar-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.radar-searches { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.radar-searches i { font-style: normal; font-size: 11px; padding: 2px 8px; border-radius: var(--pill); background: var(--surface-2); border: 1px solid var(--line-2); cursor: copy; }

@@ -11,6 +11,7 @@ const state = {
   cSort: { key: "best_multiplier", dir: -1 },
   vLimit: 150,
   watching: new Set(),
+  malandroRunning: new Set(),   // vídeos com o Método Malandro rodando (o botão mostra "Rodando…")
 };
 
 // ---------------------------------------------------------------- utilidades
@@ -318,17 +319,32 @@ async function loadVideos() {
 
 // Perfil com nicho definido: em "Só o que viraliza agora", só entra o que a IA confirmou como do nicho (nota 2 ou 3).
 const nicheOn = () => { const p = currentProfile(); return !!(p && p.kind !== "coringa" && p.niche); };
+// Nicho pequeno: se os parâmetros trazem pouca coisa, a lista amplia o período (30, depois 90 dias) e marca o que
+// é mais velho que os parâmetros como "fora do período". A ordem continua a dos parâmetros (views por hora).
+const WIDEN_DAYS = [30, 90], MIN_LIST = 10;
 function filteredVideos() {
   const onlyParams = segValue($("#v-mode")) === "params";
   const q = $("#v-search").value.trim().toLowerCase();
   const niche = nicheOn();
-  return state.videos.filter((v) => {
-    if (onlyParams && !passesViral(v)) return false;
+  const pick = (p) => state.videos.filter((v) => {
+    if (onlyParams && !passesViral(v, p)) return false;
     if (onlyParams && niche && !(v.niche_fit >= 2)) return false;
     if (q && !`${v.title} ${v.channel_title}`.toLowerCase().includes(q)) return false;
     return true;
   });
+  let list = pick(state.viral);
+  state.widenedDays = null;
+  if (onlyParams && list.length < MIN_LIST && state.viral) {
+    for (const wd of WIDEN_DAYS) {
+      if (wd <= state.viral.max_days) continue;
+      const wider = pick({ ...state.viral, max_days: wd });
+      if (wider.length > list.length) { list = wider; state.widenedDays = wd; }
+      if (list.length >= MIN_LIST) break;
+    }
+  }
+  return list;
 }
+const outOfPeriod = (v) => state.widenedDays && (v.age_days ?? (v.age_hours != null ? v.age_hours / 24 : 0)) > state.viral.max_days;
 const vSortNow = () => state.vSort.key ? state.vSort : { key: viralSortKey(), dir: -1 };
 
 function renderVideos() {
@@ -343,6 +359,7 @@ function renderVideos() {
 
   body.innerHTML = shown.map((v) => {
     const tags = [];
+    if (outOfPeriod(v)) tags.push(`<span class="tag fresh" title="Mais velho que os ${state.viral.max_days} dias dos seus parâmetros: entrou porque no seu período veio pouca coisa">fora do período</span>`);
     tags.push(...channelTags(v));
     if (v.sources && v.sources.includes("history")) tags.push(`<span class="tag via" title="O perfil assistiu esse vídeo (veio do histórico)">Assistido</span>`);
     if (v.sources && v.sources.includes("research")) tags.push(`<span class="tag via" title="Veio de uma pesquisa">Pesquisa</span>`);
@@ -377,6 +394,15 @@ function renderVideos() {
       : `<b>Nenhum vídeo com esses filtros</b>Apague a busca para ver mais vídeos.`;
     empty.hidden = false;
   } else empty.hidden = true;
+  let widen = $("#v-widen");
+  if (!widen) {
+    widen = document.createElement("div");
+    widen.id = "v-widen";
+    widen.className = "alert info v-widen";
+    $("#v-table").closest(".table-wrap").before(widen);
+  }
+  widen.hidden = !state.widenedDays;
+  if (state.widenedDays) widen.innerHTML = `Nos seus ${state.viral.max_days} dias veio pouca coisa do nicho: mostrando também os vídeos de até <b>${state.widenedDays} dias</b> (marcados "fora do período"), do mais recente e mais visto para o menos.`;
 
   // Vídeos que batem a régua mas ainda não foram conferidos com o nicho do perfil (coletas antigas).
   const unchecked = nicheOn() ? state.videos.filter((v) => v.niche_fit == null && passesViral(v)).length : 0;
@@ -1142,17 +1168,24 @@ function malandroRadar(m) {
   </svg>`;
 }
 
+const langName = (c) => LANG_NAME[c] || c.toUpperCase();
 function renderMalandro(m, videoId, open = false) {
   if (!m) {
     return `<div class="mal-empty"><p class="dim small">Em que línguas <b>ninguém fez este vídeo ainda</b>: a IA escreve o título como um nativo
       escreveria em 13 línguas, o darkbot procura no YouTube de cada país e marca onde está livre.</p>
-      <button class="btn primary sm" data-malandro-run="${videoId}" ${state.aiEnabled ? "" : "disabled"}>Rodar Método Malandro <span class="btn-note">· ~US$ 0,01</span></button></div>`;
+      ${state.malandroRunning.has(videoId)
+        ? `<button class="btn primary sm" disabled>Rodando… a IA está procurando nos 13 países (uns 15 a 30 s)</button>`
+        : `<button class="btn primary sm" data-malandro-run="${videoId}" ${state.aiEnabled ? "" : "disabled"}>Rodar Método Malandro <span class="btn-note">· ~US$ 0,01</span></button>`}</div>`;
   }
   const free = m.langs.filter((l) => l.status === "livre");
   const order = { livre: 0, pouca: 1, saturada: 2 };
   const langs = [...m.langs].sort((a, b) => order[a.status] - order[b.status] || a.name.localeCompare(b.name));
   return `<div class="mal">
     ${malandroRadar(m)}
+    ${m.original_dubs?.length ? `<div class="alert info mal-dub" title="Recurso de áudio em vários idiomas do YouTube: o mesmo vídeo toca dublado para quem fala outra língua">
+      O vídeo original tem <b>dublagem automática</b> do YouTube em ${m.original_dubs.map((c) => `${flagImg(c)} ${esc(langName(c))}`).join(", ")}
+      (por isso o título aparece traduzido lá). <b>Não conta como "já feito"</b>: só vale quem fez o vídeo nativo na língua.</div>` : ""}
+    ${m.original_titles?.length ? `<div class="dim small mal-dub">O canal também traduziu o título para ${m.original_titles.map((c) => esc(langName(c))).join(", ")} (o áudio continua no original).</div>` : ""}
     ${free.length ? `<div class="mal-free"><span>Ninguém fez em:</span>${free.map((l) => `<b>${flagImg(l.code)} ${esc(l.name)}</b>`).join("")}</div>`
       : `<div class="mal-free bad">Esse vídeo já foi feito em todas as línguas pesquisadas.</div>`}
     ${m.paises ? renderPaises(m.paises, m.video_id) : `<div class="paises-cta">
@@ -1164,12 +1197,14 @@ function renderMalandro(m, videoId, open = false) {
         const [lab, cls] = MAL_STATUS[l.status];
         return `<div class="mal-lang ${l.status}">
           <div class="mal-lang-head">${flagImg(l.code)}<b>${esc(l.name)}</b>${l.original ? `<span class="tag via" title="O idioma do vídeo original">idioma do vídeo</span>` : ""}
+            ${l.original_dub ? `<span class="tag neutral" title="O original toca com dublagem automática nesse idioma. Não conta como já feito (só vale vídeo nativo).">original tem dublagem</span>` : ""}
+            ${l.original_title ? `<span class="tag neutral" title="O canal traduziu o título para esse idioma, mas o áudio continua no original">título traduzido</span>` : ""}
             <span class="tag ${cls}">${lab}</span><span class="dim small">${l.channels === 0 ? "nenhum canal fez" : l.channels === 1 ? "1 canal fez" : `${l.channels} canais fizeram`}</span></div>
           ${l.suggested_title ? `<div class="mal-title" data-copy="${esc(l.suggested_title)}" title="Clique para copiar"><span>Título pronto nesse idioma</span>${esc(l.suggested_title)}</div>` : ""}
           ${l.videos.length ? `<div class="mal-videos">${l.videos.map((v) => `<div class="mal-v" data-vref="${v.video_id}">
               <img src="https://i.ytimg.com/vi/${v.video_id}/mqdefault.jpg" alt="">
               <div class="grow"><div class="otitle">${esc(v.title)}</div>
-                <div class="dim small">${esc(v.channel_title || "")} · ${fmt(v.views)} views · ${fmtAge(v.age_days)}${v.relevance >= 3 ? " · <b class='up'>fez o mesmo vídeo</b>" : " · mesmo assunto"}</div></div>
+                <div class="dim small">${esc(v.channel_title || "")} · ${fmt(v.views)} views · ${fmtAge(v.age_days)}${v.relevance >= 3 ? " · <b class='up'>fez o mesmo vídeo</b>" : " · mesmo assunto"}${v.dubs?.length ? ` · dublado em ${v.dubs.map((c) => esc(langName(c))).join(", ")}` : ""}</div></div>
               <span class="mult ${multClass(v.multiplier)}">${fmtMult(v.multiplier)}</span></div>`).join("")}</div>` : ""}
         </div>`; }).join("")}</div>
       <div class="mal-foot dim small">Feito em ${fmtDate(m.created_at)} · <span class="link" data-malandro-run="${m.video_id}" data-refresh="1">refazer (~US$ 0,01)</span></div>
@@ -1203,12 +1238,15 @@ function renderPaises(p, videoId) {
   };
   const top = p.markets.filter((c) => c.score > 0 && c.level !== "baixa").slice(0, 6);
   const orig = p.markets.find((c) => c.original);
+  const dubbed = p.markets.filter((c) => c.original_dub);
   const nCountries = p.markets.reduce((n, mk) => n + mk.countries.length, 0);
   return `<div class="paises">
     <div class="paises-h"><h4>Onde há procura e ninguém faz</h4><span class="dim small">${nCountries} países, ${p.markets.length} idiomas</span></div>
-    <p class="paises-sum">${esc(p.summary)}</p>
-    ${top.map(card).join("")}
+    ${top.length ? `<p class="paises-sum">${esc(p.summary)}</p>` : ""}
+    ${top.length ? top.map(card).join("") : `<div class="paises-none"><b>Nenhum mercado com procura e livre agora.</b>
+      Onde há procura, o vídeo já existe; onde está livre, quase ninguém assiste esse tema no último mês.</div>`}
     ${orig ? `<div class="dim small paises-orig">${flagImg(orig.lang)} ${esc(orig.lang_name)} é o idioma do vídeo original: já existe lá, não entra como oportunidade.</div>` : ""}
+    ${dubbed.length ? `<div class="dim small paises-orig">${dubbed.map((c) => `${flagImg(c.lang)} ${esc(c.lang_name)}`).join(", ")}: o original tem dublagem automática ${dubbed.length === 1 ? "nesse idioma" : "nesses idiomas"} (não conta como já feito).</div>` : ""}
     <details class="paises-all"><summary class="btn sm mal-btn">Ver todos os ${p.markets.length} idiomas</summary>
       <div class="paises-table">${p.markets.map((c) => `<div class="pt-row">
         ${flagImg(c.lang)}<span class="pt-name">${esc(c.lang_name)}</span><span class="tag ${DEMAND[c.level][1]}">${DEMAND[c.level][0]}</span>
@@ -1233,8 +1271,22 @@ document.addEventListener("click", async (e) => {
   if (!b) return;
   e.stopPropagation();
   if (b.dataset.refresh && !confirm("Refazer o Método Malandro (~US$ 0,01)?")) return;
-  try { watchJob(await api(`/api/malandro/${b.dataset.malandroRun}`, { method: "POST" })); toast("Método Malandro rodando… (uns 15 segundos)"); }
-  catch (err) { toast(err.message, "err"); }
+  const id = b.dataset.malandroRun;
+  // Mostra "Rodando…" no próprio botão (o painel da prévia cobre parte da tela).
+  state.malandroRunning.add(id);
+  b.disabled = true;
+  b.textContent = "Rodando… a IA está procurando nos 13 países (uns 15 a 30 s)";
+  try {
+    watchJob(await api(`/api/malandro/${id}`, { method: "POST" }), null, (j) => {
+      state.malandroRunning.delete(id);
+      if (j.status === "error") toast(`Método Malandro: ${j.error}`, "err");
+    });
+  } catch (err) {
+    state.malandroRunning.delete(id);
+    b.disabled = false;
+    b.textContent = "Rodar Método Malandro";
+    toast(err.message, "err");
+  }
 }, true);
 
 // ---------------------------------------------------------------- configurações
@@ -1428,7 +1480,7 @@ $("#jobs").addEventListener("click", async (e) => {
   try { await api(`/api/jobs/${b.dataset.cancel}/cancel`, { method: "POST" }); } catch (err) { toast(err.message, "err"); }
 });
 
-function watchJob(j, onDone = null) {
+function watchJob(j, onDone = null, onEnd = null) {
   if (state.watching.has(j.id)) return;
   state.watching.add(j.id);
   renderJob(j);
@@ -1437,6 +1489,7 @@ function watchJob(j, onDone = null) {
     const el = renderJob(j);
     if (j.status === "running") return setTimeout(tick, 700);
     state.watching.delete(j.id);
+    if (onEnd) onEnd(j);
     if (j.status === "error") $(".job-x", el).addEventListener("click", () => el.remove());
     // Erro fica mais tempo para dar para ler (o detalhe também fica no histórico de coletas).
     setTimeout(() => el.remove(), j.status === "error" ? 12000 : 4000);
@@ -1494,6 +1547,8 @@ async function refreshAll() {
 // ---------------------------------------------------------------- Próximos vídeos (modelados, DNA, mapa e os vídeos reais para modelar)
 
 const NX = { runs: [], data: null, queue: [], modeled: [], dna: null, kinds: {}, boldness: {} };
+const NX_VIA = { origem: "o canal de origem postou", a_seguir: "recomendado depois do seu vídeo",
+  mesmo: "quem fez o mesmo vídeo postou", assunto: "busca do assunto" };
 const NX_KIND_TIP = {
   continuacao: "Continuação: uma parte 2, ou outro caso no mesmo formato do que você já fez",
   vizinho: "Tema vizinho: outro assunto que o mesmo público assiste e que está funcionando agora",
@@ -1593,9 +1648,9 @@ const refThumbs = (refs, n = 3) => refs.slice(0, n).map((r) => `<img loading="la
 
 function renderNext() {
   const d = NX.data;
-  if (!d || d.version !== 3) {
+  if (!d || d.version < 4) {
     $("#mc-result").innerHTML = `<div class="box"><div class="empty"><b>${d ? "Esta rodada é do jeito antigo" : "Nenhuma rodada ainda"}</b>
-      ${d ? "Ela tinha títulos inventados pela IA. Clique em \"Achar os próximos\" para ver vídeos reais." :
+      ${d ? "Clique em \"Achar os próximos\": agora o darkbot parte do vídeo que você modelou (o que o canal de origem postou, o que o público assiste em seguida e o que viraliza no assunto)." :
       "Adicione os vídeos que você já modelou, escolha a ousadia e clique em \"Achar os próximos\": o darkbot busca o que está viralizando agora no seu nicho (pelos seus parâmetros) e escolhe os vídeos reais que você deve modelar."}</div></div>`;
     return;
   }
@@ -1607,9 +1662,9 @@ function renderNext() {
   };
   $("#mc-result").innerHTML = `
     <div class="nx-strategy"><span>A estratégia agora · ousadia ${esc(NX.boldness[d.boldness] || "")}</span><p>${esc(d.strategy)}</p></div>
-    <div class="nx-meta"><span title="Como a IA entendeu o seu nicho">Nicho: ${esc(d.niche)}</span>
-      <span>${fmtDate(d.created_at)} · ${d.pool.length} vídeos viralizando analisados · ${fmtUSD(d.cost_usd)}</span></div>
-    <div class="nx-params" title="Só entram vídeos que batem os seus parâmetros (Configurações)">Seus parâmetros nesta rodada: ${esc(d.params || "")}</div>
+    <div class="nx-meta">${d.anchors?.length ? `<span>A partir de: ${d.anchors.map((a) => `<span class="link" data-vref="${a.video_id}">${esc(a.title)}</span>`).join(" · ")}</span>` : ""}
+      <span title="Quantos vídeos o darkbot olhou e quantos sobraram depois de cada filtro">${d.funnel ? `${fmt(d.funnel.candidates)} vídeos olhados → ${d.funnel.niche} do nicho (sem o mesmo vídeo) → ${d.funnel.final} viralizando · ` : ""}${fmtDate(d.created_at)} · ${fmtUSD(d.cost_usd)}</span></div>
+    <div class="nx-params" title="Só entram vídeos que batem os seus parâmetros (Configurações)">Seus parâmetros: ${esc(d.params || "")}${d.widened ? ` · <b class="warn-txt">nos seus ${esc(String(d.params || "").match(/\d+/)?.[0] || "")} dias veio pouca coisa: ampliei para ${d.days_used} dias</b>` : ""}</div>
     <div class="box" style="margin-bottom:12px"><div class="box-head"><h3>Modele estes, nesta ordem</h3><span class="dim small">vídeos reais viralizando agora no seu nicho</span></div>
     <div class="nx-list">${d.items.map((it, i) => {
       const q = NX.queue.find((x) => x.video_id === it.video_id), md = state.modeled.has(it.video_id);
@@ -1620,7 +1675,9 @@ function renderNext() {
           <div class="otitle" data-vref="${it.video_id}" title="${esc(it.title)}">${esc(it.title)}</div>
           <div class="v-meta"><span class="ch">${esc(it.channel_title || "")}</span>${langTag(it)}
             <span class="tag k-${it.kind}" title="${esc(NX_KIND_TIP[it.kind] || "")}">${esc(NX.kinds[it.kind] || it.kind)}</span>
-            ${it.territory ? `<span class="tag terr-tag" title="Território do mapa">${esc(it.territory)}</span>` : ""}</div>
+            ${it.territory ? `<span class="tag terr-tag" title="Território do mapa">${esc(it.territory)}</span>` : ""}
+            ${(it.via || []).map((x) => `<span class="tag via" title="De onde veio este vídeo">${esc(NX_VIA[x] || x)}</span>`).join("")}
+            ${it.widened ? `<span class="tag fresh" title="Postado antes do período dos seus parâmetros (o período foi ampliado porque veio pouca coisa)">fora do período</span>` : ""}</div>
           <div class="nx-nums">
             <span title="Views por hora desde que foi postado"><b class="vph">${fmt(it.views_hour)}</b> views/hora</span>
             <span title="Total de views"><b>${fmt(it.views)}</b> views</span>
@@ -1751,3 +1808,98 @@ document.addEventListener("click", async (e) => {
     if ($("#page-next").classList.contains("active")) loadNext(NX.data?.id);
   } catch (err) { toast(err.message, "err"); }
 }, true);
+
+// ---------------------------------------------------------------- Radar do zero (achar nichos com oportunidade fresca)
+
+const RADAR = { runs: [], data: null };
+const COMP = { baixa: ["Pouca concorrência", "good"], media: ["Concorrência média", "warn"], alta: ["Muita concorrência", "neutral"] };
+const ENTRY = { facil: "Fácil de fazer", medio: "Médio de fazer", dificil: "Difícil de fazer" };
+
+async function openRadar(id = null) {
+  $("#pv").hidden = false;
+  PV.id = null; PV.report = null;
+  $("#pv-body").innerHTML = `<div class="pv-loading">Carregando…</div>`;
+  try {
+    const d = await api("/api/radar");
+    RADAR.runs = d.runs;
+    RADAR.data = id ? await api(`/api/radar/${id}`) : d.latest;
+  } catch (e) { return toast(e.message, "err"); }
+  renderRadar();
+}
+
+function renderRadar() {
+  const d = RADAR.data;
+  const head = `<div class="pv-top"><span class="pv-kicker">Radar do zero</span>
+      <button class="icon-btn" id="pv-close" title="Fechar (Esc)"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <h2 class="pv-title">Nichos com oportunidade agora</h2>
+    <p class="dim small">Para quem está decidindo o nicho (ou usa perfil coringa): o darkbot varre o que está viralizando <b>agora</b>
+      entre canais <b>dark</b> de qualquer tema (português, inglês e espanhol), pela régua dos seus parâmetros, e agrupa em nichos.
+      Escolha um e crie o perfil para afunilar.</p>`;
+  const runBtn = (again) => `<button class="btn ${again ? "" : "primary"} sm" data-radar-run ${state.aiEnabled ? "" : "disabled"}>
+    ${again ? "Varrer de novo" : "Varrer agora"} <span class="btn-note">· ~US$ 0,15 · 2 a 4 min</span></button>`;
+  if (!d) {
+    $("#pv-body").innerHTML = head + `<div class="pv-section">${runBtn(false)}</div>`;
+    return;
+  }
+  const f = d.funnel || {};
+  const card = (n, i) => {
+    const [cl, cc] = COMP[n.competition];
+    return `<div class="radar-n">
+      <div class="radar-h"><span class="pais-rank">${i + 1}</span><b>${esc(n.name)}</b>
+        ${(n.langs || []).map((l) => flagImg(l)).join("")}
+        <span class="tag ${cc}" title="Quantos canais (e de que tamanho) já fazem esse nicho">${cl}</span>
+        <span class="tag neutral" title="Quanto trabalho um canal dark novo tem para fazer esse tipo de vídeo">${ENTRY[n.entry]}</span></div>
+      <p class="radar-what">${esc(n.what)}</p>
+      <div class="radar-nums">
+        <span title="Vídeos dark desse nicho viralizando agora"><b>${n.count}</b> vídeos</span>
+        <span title="Views por hora típicas (mediana) dos vídeos do nicho"><b class="vph">${fmt(n.vph_median)}</b> views/hora típico</span>
+        <span title="Canais diferentes fazendo"><b>${n.channels}</b> canais</span>
+        <span title="Canais criados há até 6 meses indo bem = tem espaço para entrar"><b class="${n.new_channels ? "up" : ""}">${n.new_channels}</b> canais novos</span>
+      </div>
+      <div class="radar-why">${esc(n.why_now)}</div>
+      <div class="radar-vids">${n.videos.slice(0, 4).map((v) => `<div class="radar-v" data-vref="${v.video_id}" title="${esc(v.title)} · ${esc(v.channel_title || "")} · ${fmt(v.views_hour)} views/h · postado há ${ageLong(v.age_days)}">
+        <img loading="lazy" src="https://i.ytimg.com/vi/${v.video_id}/mqdefault.jpg" alt=""><span>${fmt(v.views_hour)}/h</span></div>`).join("")}</div>
+      <div class="radar-foot">
+        <div class="radar-searches" title="Buscas para treinar o perfil nesse nicho (clique para copiar)">${n.searches.map((s) => `<i data-copy="${esc(s)}">${esc(s)}</i>`).join("")}</div>
+        <button class="btn primary sm" data-radar-profile="${i}" title="Cria um perfil com esse nicho já preenchido (depois é só treinar ou garimpar nele)">Criar perfil com este nicho</button>
+      </div>
+    </div>`;
+  };
+  $("#pv-body").innerHTML = head + `
+    <div class="radar-meta dim small">
+      ${RADAR.runs.length > 1 ? `<select class="select sm" id="radar-hist">${RADAR.runs.map((r) => `<option value="${r.id}" ${r.id === d.id ? "selected" : ""}>${fmtDate(r.created_at)} · ${r.niches} nichos</option>`).join("")}</select>` : ""}
+      <span title="Quantos vídeos foram olhados e quantos sobraram em cada filtro">${fmt(f.found)} vídeos olhados → ${fmt(f.in_rule)} na sua régua → ${f.dark} de canais dark → ${f.pool} agrupados</span>
+      <span>${fmtDate(d.created_at)} · ${fmtUSD(d.cost_usd)}</span>
+    </div>
+    <div class="nx-params">Seus parâmetros: ${esc(d.params || "")}</div>
+    ${d.niches.length ? d.niches.map(card).join("") : `<div class="paises-none"><b>Nenhum nicho se formou.</b>Poucos vídeos dark viralizando juntos no mesmo assunto agora.</div>`}
+    <div class="mal-foot">${runBtn(true)}</div>`;
+}
+
+$("#nb-radar")?.addEventListener("click", () => openRadar());
+
+$("#pv-body").addEventListener("click", async (e) => {
+  if (e.target.closest("[data-radar-run]")) {
+    if (RADAR.data && !confirm("Varrer de novo gasta uns US$ 0,15 e leva de 2 a 4 minutos. Continuar?")) return;
+    try {
+      watchJob(await api("/api/radar", { method: "POST" }), (j) => { if (!$("#pv").hidden && !PV.id) openRadar(j.result?.radar_id); });
+      toast("Radar do zero rodando… (2 a 4 minutos). Pode fechar o painel: ele abre sozinho quando terminar.");
+    } catch (err) { toast(err.message, "err"); }
+    return;
+  }
+  const pb = e.target.closest("[data-radar-profile]");
+  if (pb) {
+    const n = RADAR.data.niches[+pb.dataset.radarProfile];
+    const name = prompt("Nome do perfil:", n.name);
+    if (!name) return;
+    try {
+      await api("/api/profiles", { method: "POST", body: { name, kind: "nicho", niche: n.profile_niche } });
+      toast(`Perfil "${name}" criado com o nicho "${n.profile_niche}". Em Perfis: treine ou garimpe nele.`, "ok");
+      pb.disabled = true; pb.textContent = "Perfil criado";
+      refreshAll();
+    } catch (err) { toast(err.message, "err"); }
+  }
+});
+$("#pv-body").addEventListener("change", (e) => {
+  if (e.target.id === "radar-hist") openRadar(+e.target.value);
+});

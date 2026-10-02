@@ -65,7 +65,7 @@ def _fetch_items(path: str, part: str, ids, key: str) -> list[dict]:
 
 def fetch_videos(ids, key: str) -> list[dict]:
     out = []
-    for it in _fetch_items("videos", "snippet,statistics,contentDetails,status", ids, key):   # mesma cota
+    for it in _fetch_items("videos", "snippet,statistics,contentDetails,status,localizations", ids, key):   # mesma cota
         sn, st = it.get("snippet", {}), it.get("statistics", {})
         out.append({
             "video_id": it["id"],
@@ -81,6 +81,8 @@ def fetch_videos(ids, key: str) -> list[dict]:
             "description": (sn.get("description") or "")[:2000],
             "tags": sn.get("tags") or [],
             "kids": bool(it.get("status", {}).get("madeForKids")),   # "feito para crianças" (desenho, infantil)
+            # idiomas em que o próprio canal traduziu o título (quem fala essa língua vê o título traduzido)
+            "title_langs": sorted({k.split("-")[0].lower() for k in (it.get("localizations") or {})}),
         })
     return out
 

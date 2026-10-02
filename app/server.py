@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import (ai, analytics, chrome_profiles, config, db, garimpo, jobs, malandro, paises, proximos, research, titles,
+from . import (ai, analytics, chrome_profiles, config, db, garimpo, jobs, malandro, paises, proximos, radar, research, titles,
                viral, youtube_api, youtube_web)
 from .paths import PROFILES_DIR, UI_DIR
 
@@ -601,6 +601,33 @@ def queue_delete(item_id: int):
     with db.tx() as con:
         con.execute("DELETE FROM queue WHERE id=?", (item_id,))
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- Radar do zero (achar nichos)
+
+@app.post("/api/radar")
+def radar_run():
+    """Varre o que viraliza agora entre canais dark de qualquer tema e agrupa em nichos. Em segundo plano."""
+    if not ai.enabled():
+        raise HTTPException(400, "IA desligada (sem chave em Configurações).")
+    try:
+        return jobs.start("radar", "Radar do zero", radar.run, key="radar", cancellable=True).to_dict()
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/radar")
+def radar_list():
+    runs = radar.runs()
+    return {"runs": runs, "latest": radar.get(runs[0]["id"]) if runs else None}
+
+
+@app.get("/api/radar/{radar_id}")
+def radar_get(radar_id: int):
+    r = radar.get(radar_id)
+    if not r:
+        raise HTTPException(404, "Varredura não encontrada.")
+    return r
 
 
 class HideIn(BaseModel):

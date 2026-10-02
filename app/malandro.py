@@ -76,6 +76,14 @@ def run(job: jobs.Job, video_id: str) -> dict:
     if not info:
         raise RuntimeError("Não encontrei esse vídeo no YouTube.")
     seed_lang = (info.get("lang") or "").split("-")[0].lower() or None
+    # O próprio vídeo pode ter áudio dublado (dublagem automática do YouTube) e título traduzido em outras línguas.
+    # Regra do editor: dublagem NÃO ocupa a língua (só conta quem fez um vídeo NATIVO nela). Fica só como informação.
+    with youtube_web.client() as c:
+        audio = youtube_web.audio_langs(c, video_id)
+    seed_lang = seed_lang or next((k for k, v in audio.items() if v == "original"), None)
+    orig_dubs = sorted(k for k, v in audio.items() if v == "dublado" and k in ai.LANGUAGES and k != seed_lang)
+    orig_titles = sorted(k for k in info.get("title_langs", [])
+                         if k in ai.LANGUAGES and k != seed_lang and k not in orig_dubs)
     prof = ai.seed_profile(video_id, info["title"], info.get("channel_title") or "", info.get("description") or "",
                            info.get("tags") or [], seed_lang or "?")
     reference = f"\"{info['title']}\" — {prof['topic']} (ângulo: {prof['angle']})"
@@ -112,6 +120,11 @@ def run(job: jobs.Job, video_id: str) -> dict:
     chans = {c["channel_id"]: c for c in youtube_api.fetch_channels(
         list({v["channel_id"] for v in vids.values() if v.get("channel_id")}), key)}
 
+    # Concorrentes que fizeram o MESMO vídeo: em que línguas estão dublados (só informação, sem cota, em paralelo).
+    direct_ids = [vid for vid in same if vid in vids and same[vid][0] >= 3]
+    with youtube_web.client() as c, ThreadPoolExecutor(youtube_web.WORKERS) as pool:
+        dub_map = dict(zip(direct_ids, pool.map(lambda v: youtube_web.audio_langs(c, v), direct_ids)))
+
     def card(vid):
         v, (r, lang) = vids[vid], same[vid]
         lang = fix_lang(lang, v.get("title") or "", v.get("lang"))
@@ -120,13 +133,17 @@ def run(job: jobs.Job, video_id: str) -> dict:
         mult = round(v["views"] / max(subs, 100), 2) if v.get("views") is not None and subs is not None else None
         return {"video_id": vid, "title": v["title"], "channel_id": v.get("channel_id"),
                 "channel_title": v.get("channel_title"), "views": v.get("views"), "subs": subs, "multiplier": mult,
-                "age_days": round(age, 1) if age else None, "relevance": r, "lang": lang}
+                "age_days": round(age, 1) if age else None, "relevance": r, "lang": lang,
+                "dubs": sorted(k for k, t in (dub_map.get(vid) or {}).items()
+                               if t == "dublado" and k in ai.LANGUAGES and k != lang)}
 
     cards = [card(vid) for vid in same if vid in vids]
     langs_out = []
     for lang in LANGS:
-        direct = [c for c in cards if c["lang"] == lang and c["relevance"] >= 3]
+        # Só conta quem fez o vídeo NATIVO nessa língua (dublagem não conta: regra do editor).
+        direct = [c for c in cards if c["relevance"] >= 3 and c["lang"] == lang]
         theme = [c for c in cards if c["lang"] == lang and c["relevance"] == 2]
+        dubbed = len({c["channel_id"] for c in cards if c["relevance"] >= 3 and lang in c["dubs"]})
         channels = len({c["channel_id"] for c in direct}) + (1 if lang == seed_lang else 0)   # + o próprio original
         status = _status(channels)
         best = sorted(direct + theme, key=lambda c: -(c["multiplier"] or 0))[:SHOW_PER_LANG]
@@ -135,9 +152,14 @@ def run(job: jobs.Job, video_id: str) -> dict:
             "channels": channels, "theme": len(theme), "videos": best,
             "suggested_title": (local.get(lang) or {}).get("title"), "query": (local.get(lang) or {}).get("query"),
             "original": lang == seed_lang,
+            # informação (não ocupa a língua): dublagem do original, título traduzido, concorrentes dublados nela
+            "original_dub": lang in orig_dubs,
+            "original_title": lang in orig_titles,
+            "dubbed": dubbed,
         })
     result = {
         "video_id": video_id, "title": info["title"], "seed_lang": seed_lang, "topic": prof["topic"],
+        "original_dubs": orig_dubs, "original_titles": orig_titles,
         "langs": langs_out, "free": [l["code"] for l in langs_out if l["status"] == "livre"],
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }

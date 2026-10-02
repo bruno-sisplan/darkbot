@@ -32,7 +32,9 @@ FOREIGN_PAGES = 2
 SEED_RELATED_PAGES = 3      # sugeridos do vídeo de partida
 RELATED_PAGES = 2           # sugeridos de cada vídeo relevante nas camadas
 LEARN_QUERIES = 8           # buscas novas aprendidas com o que está viralizando (bola de neve)
-COMMENT_VIDEOS = 6          # vídeos que têm os comentários lidos
+WIDEN_DAYS = (30, 90)       # ampliação do período quando o nicho é pequeno (pouca coisa nos dias dos parâmetros)
+MIN_RESULTS = 15            # vídeos do assunto (nota 2 ou 3) abaixo dos quais a pesquisa amplia o período
+COMMENT_VIDEOS =6          # vídeos que têm os comentários lidos
 COMMENTS_PER_VIDEO = 100
 REPORT_VIDEOS = 30          # vídeos que entram no relatório
 REPORT_COMMENTS = 15        # comentários por vídeo que entram no relatório
@@ -169,6 +171,15 @@ class _Pool:
     def unjudged(self):
         return [(vid, it["title"]) for vid, it in self.items.items() if it["relevance"] is None]
 
+    def reopen_old(self) -> int:
+        """Ao ampliar o período: volta para o juiz o que tinha saído SÓ por ser mais velho que o período."""
+        n = 0
+        for it in self.items.values():
+            if it.get("old"):
+                it["relevance"], it["old"] = None, False
+                n += 1
+        return n
+
     def relevant(self, min_r=2):
         return {vid: it for vid, it in self.items.items() if (it["relevance"] or 0) >= min_r}
 
@@ -178,6 +189,19 @@ def run(job: jobs.Job, research_id: int, want_report: bool) -> dict:
     pool = _Pool()
     try:
         _discover(job, r, research_id, pool)
+        # Nicho pequeno: no período dos parâmetros veio pouca coisa do assunto -> amplia (30, depois 90 dias), com o
+        # mais recente e mais visto primeiro. Só gasta a mais quando precisa.
+        for wd in WIDEN_DAYS:
+            if job.stopped() or not r.get("max_age_days") or r["max_age_days"] >= wd \
+                    or len(pool.relevant(2)) >= MIN_RESULTS:
+                continue
+            job.update(None, f"Pouca coisa nos últimos {r['max_age_days']} dias ({len(pool.relevant(2))} vídeos do "
+                             f"assunto): ampliando a pesquisa para {wd} dias...")
+            r = dict(r) | {"max_age_days": wd}
+            with db.tx() as con:
+                con.execute("UPDATE research SET max_age_days=? WHERE id=?", (wd, research_id))
+            pool.reopen_old()
+            _discover(job, r, research_id, pool)
         found = {vid: it for vid, it in pool.items.items() if (it["relevance"] or 0) >= 1}
         if not found:
             raise RuntimeError("A pesquisa foi cancelada antes de achar vídeos." if job.stopped()
@@ -256,9 +280,11 @@ def _discover(job: jobs.Job, r: dict, research_id: int, pool: _Pool) -> None:
         for vid, title in todo:
             m = meta.get(vid)
             age = analytics._age_days(m.get("published_at")) if m else None
-            if not m or (m.get("duration_s") or 0) <= config.SHORT_MAX_SECONDS or (max_days and (age or 0) > max_days) \
+            too_old = bool(m and max_days and (age or 0) > max_days)
+            if not m or (m.get("duration_s") or 0) <= config.SHORT_MAX_SECONDS or too_old \
                     or ((m.get("views") or 0) < floor_views and _vph(m) < floor_vph) or m.get("channel_id") in not_dark:
                 pool.items[vid]["relevance"] = 0
+                pool.items[vid]["old"] = too_old   # pode voltar se o período for ampliado
                 continue
             keep.append((vid, m.get("title") or title,
                          f"{(m.get('channel_title') or '?')[:40]} | {round((m.get('duration_s') or 0) / 60)} min"))

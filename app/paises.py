@@ -136,9 +136,14 @@ def run(job: jobs.Job, video_id: str) -> dict:
         speeds = sorted((_vph(v) for v in vids), reverse=True)
         best = max(vids, key=_vph) if vids else None
         sup = by_lang.get(lang) or {}
+        # Ordem fixa por tamanho do mercado (a da lista COUNTRIES): quem tem buscas primeiro, mas sem reordenar pelo
+        # número de sugestões (isso punha a Nigéria na frente dos EUA).
         countries = sorted([{"country": cc, "name": nm, "auto": len(suggestions.get(i, [])),
-                             "suggestions": suggestions.get(i, [])[:8]}
-                            for i, (cc, lg, nm) in enumerate(COUNTRIES) if lg == lang], key=lambda x: -x["auto"])
+                             "suggestions": suggestions.get(i, [])[:8], "_i": i}
+                            for i, (cc, lg, nm) in enumerate(COUNTRIES) if lg == lang],
+                           key=lambda x: (x["auto"] == 0, x["_i"]))
+        for x in countries:
+            x.pop("_i")
         markets.append({
             "lang": lang, "lang_name": ai.LANGUAGES[lang][2], "countries": countries,
             "auto": max((x["auto"] for x in countries), default=0),
@@ -149,6 +154,7 @@ def run(job: jobs.Job, video_id: str) -> dict:
                      "views": best.get("views")} if best else None,
             "status": sup.get("status", "livre"), "channels": sup.get("channels", 0),
             "title": sup.get("suggested_title"), "original": bool(sup.get("original")), "terms": terms.get(lang, []),
+            "original_dub": bool(sup.get("original_dub")),
         })
 
     # Procura ABSOLUTA (0 a 1): views por hora típicas (1.000/h = teto) e vídeos do nicho com tração (15 = teto).
@@ -156,9 +162,11 @@ def run(job: jobs.Job, video_id: str) -> dict:
         d = 0.55 * min(1.0, math.log1p(r["vph_typical"]) / math.log1p(1000)) + 0.45 * min(1.0, r["traction"] / 15)
         r["demand"] = round(d, 2)
         r["level"] = "alta" if d >= 0.6 else "media" if d >= 0.35 else "baixa"
-        # o idioma do original não é oportunidade: o vídeo já existe lá
-        r["score"] = 0.0 if r["original"] else round(d * SUPPLY_FACTOR.get(r["status"], 0.6), 3)
-    markets.sort(key=lambda r: (r["original"], -r["score"]))
+        # Não é oportunidade: o idioma do original e o idioma saturado (3+ canais já fizeram NATIVO).
+        # A dublagem do original não conta (regra do editor: só vale quem fez o vídeo nativo na língua).
+        r["covered"] = r["original"]
+        r["score"] = 0.0 if r["covered"] or r["status"] == "saturada" else round(d * SUPPLY_FACTOR.get(r["status"], 0.6), 3)
+    markets.sort(key=lambda r: (r["covered"], -r["score"]))
 
     job.update(0.75, "IA lendo os números e escrevendo onde vale a pena...")
     top = [r for r in markets if r["score"] > 0 and r["level"] != "baixa"][:AI_COUNTRIES]
@@ -167,7 +175,9 @@ def run(job: jobs.Job, video_id: str) -> dict:
              "o que buscam no país líder)"]
     table += [f"{r['lang']} | {r['lang_name']} | {r['demand']} | "
               f"{_countries_txt(r)} | {r['traction']} de {r['videos']} | "
-              f"{r['vph_typical']} | {r['status']} ({r['channels']} canais){' (IDIOMA DO ORIGINAL: não é oportunidade)' if r['original'] else ''} | "
+              f"{r['vph_typical']} | {r['status']} ({r['channels']} canais)"
+              f"{' (IDIOMA DO ORIGINAL: não é oportunidade)' if r['original'] else ''}"
+              f"{' (o original tem dublagem automática nesse idioma; não conta como oferta)' if r['original_dub'] else ''} | "
               f"{r['score']} | {'; '.join(r['countries'][0]['suggestions'][:5]) if r['countries'] else '-'}"
               for r in markets]
     cms = research.top_comments(video_id, 30)
@@ -176,8 +186,9 @@ def run(job: jobs.Job, video_id: str) -> dict:
                       "Comentários do vídeo original (mais curtidos):",
                       *[f"- {' '.join(c['text'].split())[:160]}" for c in cms]])
     rep = ai.countries_report(video_id, text) if top else {
-        "summary": "Nenhum outro idioma mostrou procura medível por esse tema agora: poucos vídeos do nicho ganhando views "
-                   "no último mês fora do idioma original. Vale mais modelar no idioma em que ele já viraliza.",
+        "summary": "Nenhum idioma tem procura por esse tema E está livre ao mesmo tempo: onde há procura, o vídeo já "
+                   "existe (no original ou feito por 3+ canais); onde está livre, quase ninguém assiste esse tema "
+                   "no último mês. Vale mais modelar onde ele já provou que viraliza.",
         "notes": [], "comment_signals": ""}
     notes = {n["c"]: n for n in rep["notes"]}
     for r in markets:

@@ -4,10 +4,10 @@
   Não precisa logar na conta do canal (o editor usa proxy nos canais): tudo sai do perfil e dessa lista.
 - DNA do canal: a IA lê os modelados e escreve do que o canal fala (temas, formatos, ângulos, público, estilo dos
   títulos). O editor pode corrigir; a correção vale como verdade. Fica guardado e só é refeito quando a lista muda.
-- Rodada: junta o que já viraliza em Descobrir (coletas e pesquisas do perfil) com buscas novas no nicho, tudo na
-  régua dos parâmetros de viral (Configurações). A IA filtra o que o público do canal assistiria, agrupa em
-  territórios (seu território / fronteira / saturado) e ESCOLHE vídeos da tabela para modelar, com uma "ousadia"
-  (perto, equilibrado, ousado).
+- Rodada (v4): parte dos vídeos que o editor modelou e junta o que é PRÓXIMO de verdade: o que o canal de origem
+  postou, o que o YouTube recomenda depois do vídeo modelado, o que quem fez o mesmo vídeo postou e buscas amplas do
+  assunto. Tira o mesmo vídeo de novo, o que foge do nicho e canal não dark; no máximo 2 por canal; régua do editor
+  (amplia o período se vier pouca coisa). A IA ordena os vídeos reais e diz por que cada um é o próximo.
 """
 import hashlib
 import json
@@ -19,13 +19,6 @@ from pydantic import BaseModel
 
 from . import ai, analytics, config, db, jobs, research, viral, youtube_api, youtube_web
 
-QUERIES = 10            # buscas que a IA monta
-# As buscas seguem os parâmetros de viral do editor (período e "mais visto primeiro"): ver _searches().
-MAX_JUDGE = 400         # títulos que o juiz avalia
-MAX_NUMBERS = 200       # vídeos que têm os números buscados (4 unidades de cota)
-POOL = 40               # vídeos em alta (que batem os parâmetros) que a IA recebe
-SUGGESTIONS = 10        # vídeos REAIS escolhidos para modelar em seguida
-HOT_FROM_DISCOVER = 40  # o que já viraliza em Descobrir (coletas e pesquisas) entra como candidato
 DNA_MODELED = 40        # modelados que entram no DNA (os mais recentes)
 
 KINDS = {"continuacao": "Continuação", "vizinho": "Tema vizinho", "pedido": "Pedido do público",
@@ -242,152 +235,151 @@ def _dna_lines(profile_id: int) -> list[str]:
 # Contexto do canal para a rodada
 # ---------------------------------------------------------------------------
 
-def _context(profile_id: int) -> tuple[list[str], set[str], set[str]]:
-    """Linhas de contexto + IDs que não podem voltar (modelados e fila) + o que já viraliza em Descobrir."""
-    p = db.row("SELECT * FROM profiles WHERE id=?", (profile_id,))
-    if not p:
-        raise RuntimeError("Perfil não encontrado.")
-    lines = [f"# Canal do editor (perfil \"{p['name']}\")", f"Nicho: {p['niche'] or '(não definido)'}",
-             f"Idioma do canal: {research.channel_lang()}", ""]
-    lines += _dna_lines(profile_id)
-
-    mods = modeled(profile_id)
-    seen = {m["video_id"] for m in mods if m["video_id"]}
-    if mods:
-        lines += ["", "## Vídeos que o editor JÁ MODELOU (verdade; não repetir, dá para continuar a sequência)"]
-        lines += [f"- {m['my_title'] or m['title']}" + (f" (original: {m['title']})" if m["my_title"] and m["title"] else "")
-                  for m in mods[:30]]
-    q = queue(profile_id)
-    if q:
-        lines += ["", "## Vídeos que o editor JÁ VAI FAZER (não repetir)"] + [f"- {x['title']}" for x in q[:25]]
-    seen |= {x["video_id"] for x in q if x["video_id"]}
-
-    # O que já viraliza em Descobrir (coletas e pesquisas do perfil) entra como candidato, junto com as buscas novas.
-    # (fora do nicho conferido pela IA não entra: nota de nicho < 2)
-    hot = [v for v in viral.rank([v for v in analytics.videos(profile_id) if viral.passes(v)
-                                  and not (v.get("niche_fit") is not None and v["niche_fit"] < 2)])
-           if v["video_id"] not in seen]
-
-    rs = db.rows("SELECT id, label, topic FROM research WHERE profile_id=? AND status<>'error' ORDER BY id DESC LIMIT 8",
-                 (profile_id,))
-    if rs:
-        lines += ["", "## O que o editor pesquisou"]
-        for r in rs:
-            t = json.loads(r["topic"]) if r.get("topic") else None
-            lines.append(f"- {r['label']}" + (f" (tema: {t['theme']})" if t else ""))
-
-    cms = db.rows("""SELECT cm.text, cm.likes FROM comments cm
-                     JOIN research_videos rv ON rv.video_id = cm.video_id
-                     JOIN research r ON r.id = rv.research_id
-                     WHERE r.profile_id = ? GROUP BY cm.comment_id ORDER BY cm.likes DESC LIMIT 15""", (profile_id,))
-    if cms:
-        lines += ["", "## Comentários mais curtidos do público do nicho"]
-        lines += [f"- ({c['likes']}) {' '.join(c['text'].split())[:180]}" for c in cms]
-
-    if not (p["niche"] or mods or q or hot or rs):
-        raise RuntimeError("Ainda não sei do que o seu canal fala. Adicione os vídeos que você já modelou "
-                           "(ou defina o nicho do perfil).")
-    return lines, seen, hot
-
-
 # ---------------------------------------------------------------------------
-# IA: plano de buscas (Haiku) e mapa + sugestões (Sonnet)
+# Rodada v4: o PRÓXIMO a partir do que o editor modelou (vídeos reais, do nicho, viralizando)
 # ---------------------------------------------------------------------------
+# De onde vêm os candidatos (o que é "próximo" de verdade, não só "em alta no nicho"):
+#   origem   - o que o canal de origem do vídeo modelado postou (a sequência dele; mostra se a fórmula rende)
+#   a_seguir - o que o YouTube recomenda depois do vídeo modelado (o que o MESMO público assiste em seguida)
+#   mesmo    - o que os canais que fizeram o MESMO vídeo (Método Malandro) postaram
+#   assunto  - buscas amplas do assunto do vídeo modelado (no idioma dele e no do canal do editor)
+# Filtros: só o nicho (juiz), nunca o MESMO vídeo de novo (juiz de "mesmo vídeo"), só canal dark (classificação),
+# no máximo 2 por canal, e a régua do editor (período, views...). Se o período der pouca coisa, amplia (30, 90 dias)
+# e marca. Ordem: views por hora (recente + muita view = melhor).
 
-_PLAN_SYSTEM = """Você é estrategista sênior de canais dark do YouTube (sem rosto: narração com voz de IA ou locutor
-sobre imagens de IA, banco de vídeos ou animação). Recebe o que se sabe do canal do editor: o DNA e os vídeos que ele
-já modelou são a verdade, e as correções dele valem mais do que tudo. Responda:
-- niche: 1 a 2 frases com o NICHO e o PÚBLICO do canal, específicas, incluindo os temas vizinhos que o mesmo público
-  assiste. É o critério do filtro de relevância.
-- queries: {n} buscas curtas (2 a 6 palavras) em {lang}, como o PÚBLICO digita, para achar o que está viralizando
-  AGORA. Distribuição: {mix}. Use o vocabulário dos títulos que viralizam no nicho (nada de termo abstrato como
-  "conteúdo de mistério"), sem nome de canal e sem repetir o que o editor já fez."""
+ANCHORS = 3              # vídeos modelados usados como ponto de partida (os mais recentes)
+ORIGIN_UPLOADS = 30      # uploads do canal de origem (1 unidade de cota)
+OTHER_CHANNELS = 6       # canais que fizeram o mesmo vídeo (Malandro) que têm os uploads lidos
+OTHER_UPLOADS = 15
+RELATED_PAGES = 2        # páginas de sugeridos do vídeo modelado (sem cota)
+SEARCH_PAGES = 2
+WIDEN_DAYS = (30, 90)    # ampliação do período quando a régua do editor traz pouca coisa
+MIN_POOL = 12            # abaixo disso, amplia o período
+PER_CHANNEL = 2          # no máximo N vídeos do mesmo canal (sem "vídeos idênticos do mesmo canal")
+POOL = 30                # candidatos que a IA recebe para ordenar
+VIA_LABEL = {"origem": "o canal de origem postou", "a_seguir": "o YouTube recomenda depois do seu vídeo",
+             "mesmo": "quem fez o mesmo vídeo postou", "assunto": "busca do assunto"}
 
+_NEXT_SYSTEM = """Você é o estrategista de conteúdo de um canal dark do YouTube (sem rosto: narração sobre imagens,
+IA, animação). O editor MODELOU um vídeo e pergunta: "e agora, qual é o PRÓXIMO?". Você recebe o vídeo modelado
+(a verdade) e uma tabela numerada de vídeos REAIS do mesmo nicho que estão viralizando, com números e DE ONDE vieram:
+- "o canal de origem postou": a sequência do canal que o editor copiou (prova se a fórmula rende em outro tema);
+- "o YouTube recomenda depois do seu vídeo": o que o mesmo público assiste em seguida;
+- "quem fez o mesmo vídeo postou": o que os concorrentes fizeram depois;
+- "busca do assunto": o que viraliza no assunto.
 
-class NextPlan(BaseModel):
-    niche: str
-    queries: list[str]
-
-
-_NEXT_SYSTEM = """Você é o estrategista de conteúdo de um canal dark do YouTube. O editor pergunta: "modelei esses
-vídeos, e agora?". Você recebe a verdade sobre o canal (DNA, vídeos que ele já modelou, fila) e uma tabela numerada de
-vídeos EM ALTA AGORA no nicho, com números reais. O valor é mostrar o PRÓXIMO PASSO e o que é DIFERENTE, sempre no
-mesmo assunto e para o mesmo público.
-
-1) territories: agrupe os vídeos em alta em 5 a 8 territórios (assuntos/ângulos). Para cada um:
-   name (curto), status ("seu" = o canal já faz isso; "fronteira" = vizinho do que o canal faz, em alta, e o canal
-   NUNCA fez; "saturado" = muitos canais fazendo, difícil entrar), heat ("alta", "media" ou "baixa", pelo quanto os
-   vídeos viralizaram e são recentes), why (uma frase simples) e refs (números da tabela, 1 a 4).
-2) picks: os {n} vídeos DA TABELA que o editor deve modelar em seguida. {boldness} NÃO invente títulos: escolha
-   vídeos que EXISTEM e já provaram (o editor modela o vídeo real). Para cada um: n (o número do vídeo na tabela),
-   kind (continuacao, vizinho, pedido, tendencia ou angulo = ângulo novo no mesmo assunto), territory (o name do
-   território) e why (uma frase simples: por que esse é o próximo, com o número dele). Ordem = o que modelar
-   primeiro: views por hora alto, depois o que um canal dark replica fácil (canal pequeno ou dark, premissa clara),
-   depois o encaixe no DNA. Varie: no máximo 2 vídeos com a mesma premissa (salvo continuação do que já deu certo).
-   Não repita o que o editor já modelou ou vai fazer.
-3) strategy: 2 a 3 frases: a lógica da sequência agora.
-why, strategy e nomes de território em português do Brasil, curtos e simples (o editor não é técnico).
-IMPORTANTE: o editor NÃO vê a tabela. Nunca cite os números da tabela no texto (nada de "o vídeo 2", "o 5" ou
-"(21, 25)"): fale do vídeo pelo assunto e pelos números dele (ex.: "um vídeo sobre calma fez 25x em 3 dias").
-Os números da tabela vão SÓ no campo refs."""
-
-
-class Territory(BaseModel):
-    name: str
-    status: Literal["seu", "fronteira", "saturado"]
-    heat: Literal["alta", "media", "baixa"]
-    why: str
-    refs: list[int]
+picks: escolha até {n} vídeos DA TABELA para o editor modelar em seguida, na ordem em que deve modelar.
+- Prioridade: views por hora alto (recente + muita view), depois o que um canal dark replica fácil (premissa clara,
+  canal pequeno), depois o encaixe com o vídeo modelado. Vídeo marcado "fora do período" só se valer muito a pena.
+- {boldness}
+- Varie: não escolha dois vídeos com a mesma premissa (salvo continuação clara).
+- Para cada um: n (número na tabela), kind (continuacao = a mesma fórmula em outro tema/povo/caso; vizinho = outro
+  assunto que o mesmo público assiste; tendencia = explodindo agora; angulo = ângulo novo no mesmo assunto; pedido =
+  o público pede) e why (UMA frase simples: por que esse é o próximo, citando de onde veio e o número dele).
+strategy: 2 frases: a lógica da sequência agora.
+Português do Brasil, simples (o editor não é técnico). O editor NÃO vê a tabela: nunca cite "o vídeo 3" no texto."""
 
 
 class NextPick(BaseModel):
     n: int
     kind: Literal["continuacao", "vizinho", "pedido", "tendencia", "angulo"]
-    territory: str
     why: str
 
 
 class NextList(BaseModel):
-    territories: list[Territory]
     picks: list[NextPick]
     strategy: str
 
 
-# ---------------------------------------------------------------------------
-# Rodada
-# ---------------------------------------------------------------------------
-
-def _searches(p: dict) -> list[tuple[str, str | None]]:
-    """Buscas no período dos parâmetros, o mais visto primeiro (e "hoje" por views quando o período é curto)."""
-    up = viral.upload_filter(p["max_days"])
-    s = [("views", up), ("data", up)]
-    if p["max_days"] <= 7 and up != "hoje":
-        s.insert(0, ("views", "hoje"))
-    return s
+_DUP_SYSTEM = """Você confere se vídeos são DUPLICATAS de vídeos que o editor já modelou. Recebe os vídeos modelados e uma
+lista numerada de candidatos (n | título, em qualquer idioma).
+Duplicata (d = 1) = conta a MESMA HISTÓRIA de um modelado: o mesmo grupo/pessoa/lugar E o mesmo acontecimento
+(ex.: "Thousands of Amish are leaving their homes" e "Miles de amish están abandonando sus hogares" = duplicata).
+NÃO é duplicata (d = 0): a mesma fórmula com OUTRO assunto (outro povo, país, grupo, objeto ou acontecimento: "rarámuris
+abandonam a serra" não duplica "menonitas abandonam o México") e o mesmo grupo com outro acontecimento ("amish chegando
+a uma cidade" não duplica "amish saindo de casa").
+Liste SOMENTE as duplicatas: n = número."""
 
 
-def _cards(ids: list[str], key: str) -> list[dict]:
-    p = viral.get() | {"only_dark": False}   # dark/não dark ainda não é conhecido aqui; o juiz já filtrou o nicho
-    vids = youtube_api.fetch_videos(ids, key)
-    chans = {c["channel_id"]: c for c in youtube_api.fetch_channels(
-        list({v["channel_id"] for v in vids if v.get("channel_id")}), key)}
+class Dup(BaseModel):
+    n: int
+
+
+class DupList(BaseModel):
+    items: list[Dup]
+
+
+def _duplicates(anchors: list[dict], items: list[tuple[str, str]], batch: int = 100) -> set[str]:
+    """IDs que contam a mesma história de algum vídeo modelado (Haiku, resposta compacta, em lotes)."""
+    if not items:
+        return set()
+    system = _DUP_SYSTEM + "\n\nVídeos modelados:\n" + "\n".join(f"- {a['title']}" for a in anchors)
+
+    def one(part):
+        user = "\n".join(f"{i} | {' '.join((t or '').split())[:120]}" for i, (_v, t) in enumerate(part, 1))
+        res = ai._run("dup:v1", hashlib.sha1((system + user).encode()).hexdigest()[:20], config.AI_MODEL_FAST,
+                      system, user, DupList, max_tokens=8 * len(part) + 150)
+        return {part[x["n"] - 1][0] for x in res["items"] if 1 <= x["n"] <= len(part)}
+
+    out: set[str] = set()
+    with ThreadPoolExecutor(ai.AI_WORKERS) as tp:
+        for d in tp.map(one, [items[i:i + batch] for i in range(0, len(items), batch)]):
+            out |= d
+    return out
+
+
+def _ensure(ids: list[str], key: str) -> None:
+    """Grava os vídeos que o app ainda não conhece e busca os números (1 unidade de cota a cada 50)."""
+    if not ids:
+        return
+    with db.tx() as con:
+        con.executemany("INSERT OR IGNORE INTO videos(video_id, first_seen_at) VALUES(?, ?)",
+                        [(v, now_iso()) for v in ids])
+    jobs.enrich(None, ids, key)
+
+
+def _detail(ids: list[str]) -> dict[str, dict]:
+    out = {}
+    for vid in ids:
+        v = analytics.video_detail(vid)
+        if v and v.get("title") and not v.get("is_short") and not v.get("hidden"):
+            if v.get("views_hour") is None:
+                viral.add_metrics(v)
+            out[vid] = v
+    return out
+
+
+def _niche_subject(profile_id: int, anchors: list[dict]) -> str:
+    """O assunto do nicho: o do perfil; sem ele, os temas do DNA (tirados dos modelados); sem DNA, os temas dos modelados."""
+    p = db.row("SELECT niche FROM profiles WHERE id=?", (profile_id,)) or {}
+    if (p.get("niche") or "").strip():
+        return p["niche"].strip()
+    dna = dna_get(profile_id)["dna"]
+    if dna and dna.get("themes"):
+        return ", ".join(dna["themes"][:6])
+    return ", ".join(dict.fromkeys(a["profile"]["theme"] for a in anchors))
+
+
+def _anchors(profile_id: int, key: str) -> list[dict]:
+    mods = [m for m in modeled(profile_id) if m["video_id"]][:ANCHORS]
+    if not mods:
+        raise RuntimeError("Adicione o link de um vídeo que você modelou (em \"Vídeos que modelei\"): "
+                           "o próximo é achado a partir dele.")
+    _ensure([m["video_id"] for m in mods], key)
     out = []
-    for v in vids:
-        if (v.get("duration_s") or 0) <= config.SHORT_MAX_SECONDS:
-            continue  # shorts ficam de fora de tudo
-        ch = chans.get(v.get("channel_id")) or {}
-        age = analytics._age_days(v.get("published_at"))
-        c = {"video_id": v["video_id"], "title": v["title"], "channel_id": v.get("channel_id"),
-             "channel_title": v.get("channel_title"), "views": v.get("views"), "subs": ch.get("subs"),
-             "lang": (v.get("lang") or "").split("-")[0] or None, "age_days": round(age, 1) if age else None}
-        c["published_at"] = v.get("published_at")
-        c["views_day"] = round(c["views"] / max(age, 1)) if c["views"] is not None and age else None
-        c["multiplier"] = round(c["views"] / max(c["subs"], 100), 2) if c["views"] is not None and c["subs"] is not None else None
-        viral.add_metrics(c)
-        c["score"] = viral.rank_value(c, p)
-        if viral.passes(c, p):   # a régua do editor (período, views, views por hora...)
-            out.append(c)
-    return viral.rank(out, p)
+    for m in mods:
+        v = analytics.video_detail(m["video_id"])
+        if not v or not v.get("title"):
+            continue
+        tags = json.loads(v["tags"]) if isinstance(v.get("tags"), str) and v["tags"] else []
+        lang = (v.get("lang") or "").split("-")[0].lower() or None
+        prof = ai.seed_profile(v["video_id"], v["title"], v.get("channel_title") or "", v.get("description") or "",
+                               tags, lang or "?")
+        out.append({"video_id": v["video_id"], "title": v["title"], "my_title": m["my_title"],
+                    "channel_id": v.get("channel_id"), "lang": lang, "profile": prof})
+    if not out:
+        raise RuntimeError("Não consegui ler os vídeos que você modelou (removidos ou privados?).")
+    return out
 
 
 def run(job: jobs.Job, profile_id: int, boldness: str) -> dict:
@@ -396,79 +388,169 @@ def run(job: jobs.Job, profile_id: int, boldness: str) -> dict:
         raise RuntimeError("Precisa da chave do YouTube (Configurações).")
     if not ai.enabled():
         raise RuntimeError("Precisa da IA (Configurações).")
+    from . import malandro
     boldness = boldness if boldness in BOLDNESS else "equilibrado"
-    b_label, b_mix, b_rule = BOLDNESS[boldness]
+    b_label, _mix, b_rule = BOLDNESS[boldness]
     spent0 = ai.usage()["cost_usd"]
-    lang = _lang_code()
-    hl, gl, lang_name = ai.LANGUAGES[lang]
+    p = viral.get()
+    my_lang = _lang_code()
 
-    job.update(0.03, "Entendendo o seu canal...")
+    job.update(0.03, "Lendo os vídeos que você modelou...")
     if dna_get(profile_id)["stale"]:
         job.update(0.05, "Atualizando o DNA do canal com os vídeos que você modelou...")
         dna_build(profile_id)
-    ctx, seen, hot = _context(profile_id)
-    plan = ai._run("next-plan:v3", f"run:{now_iso()}:{profile_id}", config.AI_MODEL_FAST,
-                   _PLAN_SYSTEM.format(n=QUERIES, lang=lang_name, mix=b_mix), "\n".join(ctx), NextPlan, max_tokens=800)
+    anchors = _anchors(profile_id, key)
+    seen = {m["video_id"] for m in modeled(profile_id) if m["video_id"]} | \
+        {x["video_id"] for x in queue(profile_id) if x["video_id"]}
 
-    job.update(0.15, f"Procurando o que está em alta agora ({len(plan['queries'])} buscas)...")
-    tasks = [(q, s, u) for q in plan["queries"][:QUERIES] for s, u in _searches(viral.get())]
-    found: dict[str, str] = {v["video_id"]: v["title"] for v in hot[:HOT_FROM_DISCOVER]}
+    cand: dict[str, dict] = {}   # video_id -> {"title", "via": set, "anchor": video_id}
+
+    def add(vid, title, via, anchor):
+        if vid in seen:
+            return
+        c = cand.setdefault(vid, {"title": title, "via": set(), "anchor": anchor})
+        c["via"].add(via)
+
+    # Canais: origem (de cada vídeo modelado) e quem fez o mesmo vídeo (Malandro, se já rodou).
+    job.update(0.1, "Lendo o que o canal de origem e os concorrentes postaram...")
+    ch_tasks = [(a["channel_id"], ORIGIN_UPLOADS, "origem", a["video_id"]) for a in anchors if a.get("channel_id")]
+    for a in anchors:
+        mal = malandro.get(a["video_id"]) or {}
+        others = []
+        for l in mal.get("langs", []):
+            others += [v.get("channel_id") for v in l.get("videos", []) if v.get("relevance", 0) >= 3]
+        for chid in list(dict.fromkeys(c for c in others if c and c != a.get("channel_id")))[:OTHER_CHANNELS]:
+            ch_tasks.append((chid, OTHER_UPLOADS, "mesmo", a["video_id"]))
+    with ThreadPoolExecutor(youtube_web.WORKERS) as pool:
+        for (chid, n, via, anc), ups in zip(ch_tasks, pool.map(lambda t: youtube_api.fetch_uploads(t[0], key, t[1]), ch_tasks)):
+            for vid, title in ups:
+                add(vid, title, via, anc)
+
+    # Sugeridos do vídeo modelado (como o público dele) + buscas amplas do assunto (idioma do vídeo e do editor).
+    job.update(0.2, "Vendo o que o YouTube recomenda depois e buscando o assunto...")
+    up = viral.upload_filter(max(WIDEN_DAYS))
+    searches = []
+    for a in anchors:
+        hl, gl, _n = ai.LANGUAGES.get(a["lang"] or my_lang, ai.LANGUAGES[my_lang])
+        for q in a["profile"]["queries"][:6]:
+            searches.append((q, hl, gl, a["video_id"]))
+        if a["lang"] != my_lang:
+            mhl, mgl, _ = ai.LANGUAGES[my_lang]
+            for q in ai.localize_queries(a["profile"]["queries"][:4], [my_lang]).get(my_lang, []):
+                searches.append((q, mhl, mgl, a["video_id"]))
     with youtube_web.client() as c, ThreadPoolExecutor(youtube_web.WORKERS) as pool:
-        # 2 páginas por busca (o "carregar mais" do site, sem cota): mais vídeos frescos para escolher.
-        for res in pool.map(lambda t: youtube_web.search(c, t[0], t[1], t[2], hl, gl, pages=2), tasks):
-            for vid, title in res:
-                if vid not in seen:
-                    found.setdefault(vid, title)
+        rel = list(pool.map(lambda a: youtube_web.related(c, a["video_id"], *ai.LANGUAGES.get(a["lang"] or my_lang, ai.LANGUAGES[my_lang])[:2],
+                                                          pages=RELATED_PAGES), anchors))
+        found = list(pool.map(lambda s: youtube_web.search(c, s[0], "views", up, s[1], s[2], pages=SEARCH_PAGES), searches))
+    for a, (_info, items) in zip(anchors, rel):
+        for vid, title in items:
+            add(vid, title, "a_seguir", a["video_id"])
+    for s, items in zip(searches, found):
+        for vid, title in items:
+            add(vid, title, "assunto", s[3])
+    for a in anchors:
+        cand.pop(a["video_id"], None)
     if job.stopped():
         raise RuntimeError("Cancelado.")
-    if not found:
-        raise RuntimeError("O YouTube não devolveu resultados agora. Tente de novo em instantes.")
+    if not cand:
+        raise RuntimeError("O YouTube não devolveu nada agora. Tente de novo em instantes.")
 
-    job.update(0.4, f"IA separando o que o seu público assistiria ({len(found)} vídeos)...")
-    items = list(found.items())[:MAX_JUDGE]
-    notes = ai.judge_relevance(f"vídeos que o público deste canal assistiria. {plan['niche']}", items)
-    keep = [vid for vid, _ in items if notes.get(vid, 0) >= 2]
+    # Números primeiro (barato): o que nem chega perto da régua sai antes de gastar IA.
+    job.update(0.35, f"Buscando os números de {len(cand)} vídeos...")
+    _ensure(list(cand), key)
+    det = _detail(list(cand))
+    wide = p | {"max_days": max(WIDEN_DAYS), "only_dark": False}
+    alive = [vid for vid, v in det.items() if viral.passes(v, wide)]
     if job.stopped():
         raise RuntimeError("Cancelado.")
 
-    job.update(0.6, f"Buscando os números de {min(len(keep), MAX_NUMBERS)} vídeos...")
-    pool_cards = _cards(keep[:MAX_NUMBERS], key)[:POOL]
-    if not pool_cards:
-        raise RuntimeError(f"Nenhum vídeo do nicho bate os seus parâmetros agora ({viral.describe()}). "
-                           "Afrouxe em Configurações → Meus parâmetros, ou tente outra ousadia.")
+    # Juízes: nunca o MESMO vídeo de novo; só o nicho (o mesmo público, outro assunto vale).
+    job.update(0.5, f"IA tirando o que é o mesmo vídeo e o que foge do nicho ({len(alive)})...")
+    # Sai só a DUPLICATA (a mesma história de um vídeo já modelado). A mesma fórmula com outro assunto fica: é o próximo.
+    same = _duplicates(anchors, [(vid, det[vid]["title"]) for vid in alive])
+    # O nicho é o ASSUNTO (mesmo critério do Descobrir): qualquer vídeo cujo assunto principal é o nicho vale nota 2.
+    crit = research.niche_topic(_niche_subject(profile_id, anchors), [a["title"] for a in anchors])
+    notes = ai.judge_relevance(crit, [(vid, det[vid]["title"], f"{(det[vid].get('channel_title') or '?')[:40]} | "
+                                       f"{round((det[vid].get('duration_s') or 0) / 60)} min")
+                                      for vid in alive if vid not in same])
+    keep = [vid for vid in alive if vid not in same and notes.get(vid, 0) >= 2]
 
-    job.update(0.75, "IA escolhendo os próximos vídeos e montando o mapa (uns 40 segundos)...")
-    table = ["", f"## Vídeos viralizando agora no nicho, já dentro dos parâmetros do editor ({viral.describe()})",
-             "(n | título | idioma | views por hora | views | viralizou | horas desde que postou | canal)"]
-    table += [f"{i} | {c['title']} | {c['lang'] or '?'} | {_fmt_n(c.get('views_hour'))} | {_fmt_n(c['views'])} | "
-              f"{c['multiplier']}x | {round(c.get('age_hours') or 0)} | {c['channel_title']}"
-              for i, c in enumerate(pool_cards, 1)]
-    res = ai._run("next:v3", f"run:{now_iso()}:{profile_id}", config.AI_MODEL_SMART,
-                  _NEXT_SYSTEM.format(n=SUGGESTIONS, lang=lang_name, boldness=f"Ousadia pedida: {b_label}. {b_rule}"),
-                  "\n".join(ctx + table), NextList, max_tokens=8000, effort="low", timeout=240)
+    # Só dark de verdade: classifica os canais que ainda não foram olhados e aplica a régua completa.
+    job.update(0.65, "Conferindo quais canais são dark...")
+    if keep:
+        jobs.classify_new_channels(video_ids=keep)
+    det = _detail(keep)
 
-    def refs(ns):
-        return [pool_cards[n - 1] for n in ns if 1 <= n <= len(pool_cards)]
+    def pick(max_days):
+        rule = p | {"max_days": max_days}
+        ok = viral.rank([v for v in det.values() if viral.passes(v, rule)], rule)
+        out, per = [], {}
+        for v in ok:
+            ch = v.get("channel_id") or v["video_id"]
+            if per.get(ch, 0) < PER_CHANNEL:
+                per[ch] = per.get(ch, 0) + 1
+                out.append(v)
+        return out
 
-    for t in res["territories"]:
-        t["refs"] = refs(t["refs"])
-    # Cada escolha vira o vídeo REAL da tabela (com números); escolhas repetidas ou fora da tabela são descartadas.
+    days = p["max_days"]
+    pool_v = pick(days)
+    for wd in WIDEN_DAYS:
+        if len(pool_v) >= MIN_POOL or wd <= days:
+            continue
+        days = wd
+        pool_v = pick(wd)
+    pool_v = pool_v[:POOL]
+    if not pool_v:
+        raise RuntimeError(f"Nada do nicho viralizando nem em {max(WIDEN_DAYS)} dias ({viral.describe()}). "
+                           "Afrouxe os parâmetros em Configurações.")
+
+    def card(v):
+        c = cand[v["video_id"]]
+        age = v.get("age_days") if v.get("age_days") is not None else (v.get("age_hours") or 0) / 24
+        return {"video_id": v["video_id"], "title": v["title"], "channel_id": v.get("channel_id"),
+                "channel_title": v.get("channel_title"), "lang": (v.get("lang") or "").split("-")[0] or None,
+                "views": v.get("views"), "subs": v.get("subs"), "multiplier": v.get("multiplier"),
+                "views_hour": v.get("views_hour"), "age_days": round(age, 1), "age_hours": v.get("age_hours"),
+                "via": sorted(c["via"]), "anchor": c["anchor"], "widened": age > p["max_days"]}
+
+    cards = [card(v) for v in pool_v]
+    job.update(0.8, "IA escolhendo a ordem dos próximos vídeos...")
+    anchor_txt = "\n".join(f"- \"{a['title']}\"" + (f" (o editor publicou como \"{a['my_title']}\")" if a["my_title"] else "")
+                           + f" — {a['profile']['topic']}" for a in anchors)
+    table = ["(n | título | idioma | views por hora | views | viralizou | dias | canal | de onde veio)"]
+    table += [f"{i} | {c['title']} | {c['lang'] or '?'} | {_fmt_n(c['views_hour'])} | {_fmt_n(c['views'])} | "
+              f"{c['multiplier']}x | {c['age_days']}{' (fora do período)' if c['widened'] else ''} | {c['channel_title']} | "
+              f"{', '.join(VIA_LABEL[x] for x in c['via'])}" for i, c in enumerate(cards, 1)]
+    res = ai._run("next:v4", f"run:{now_iso()}:{profile_id}", config.AI_MODEL_SMART,
+                  _NEXT_SYSTEM.format(n=min(10, len(cards)), boldness=f"Ousadia pedida: {b_label}. {b_rule}"),
+                  "## Vídeos que o editor modelou\n" + anchor_txt + "\n\n## Candidatos\n" + "\n".join(table),
+                  NextList, max_tokens=4000, effort="low", timeout=180)
+
     items, used = [], set()
     for pk in res["picks"]:
-        if 1 <= pk["n"] <= len(pool_cards) and pk["n"] not in used:
+        if 1 <= pk["n"] <= len(cards) and pk["n"] not in used:
             used.add(pk["n"])
-            items.append(pool_cards[pk["n"] - 1] | {"kind": pk["kind"], "territory": pk["territory"], "why": pk["why"]})
+            items.append(cards[pk["n"] - 1] | {"kind": pk["kind"], "why": pk["why"]})
+    # Ordem do editor: o mais recente e mais visto primeiro (views por hora); os de dentro do período antes.
+    items.sort(key=lambda it: (it["widened"], -(it.get("views_hour") or 0)))
     result = {
-        "version": 3, "profile_id": profile_id, "boldness": boldness, "niche": plan["niche"], "queries": plan["queries"],
-        "params": viral.describe(),
-        "strategy": res["strategy"], "territories": res["territories"], "items": items, "pool": pool_cards,
+        "version": 4, "profile_id": profile_id, "boldness": boldness,
+        "niche": " / ".join(a["profile"]["topic"] for a in anchors),
+        "anchors": [{"video_id": a["video_id"], "title": a["title"]} for a in anchors],
+        "params": viral.describe(), "days_used": days, "widened": days > p["max_days"],
+        "funnel": {"candidates": len(cand), "in_range": len(alive), "same_video": len(same), "niche": len(keep),
+                   "final": len(cards)},
+        "strategy": res["strategy"], "territories": [], "items": items, "pool": cards,
         "created_at": now_iso(), "cost_usd": round(ai.usage()["cost_usd"] - spent0, 4),
     }
     with db.tx() as con:
         run_id = con.execute("INSERT INTO next_runs(profile_id, anchor_video_id, result, created_at) VALUES(?,?,?,?)",
-                             (profile_id, None, json.dumps(result, ensure_ascii=False), result["created_at"])).lastrowid
+                             (profile_id, anchors[0]["video_id"], json.dumps(result, ensure_ascii=False),
+                              result["created_at"])).lastrowid
     job.update(1.0, f"{len(items)} vídeos para modelar em seguida")
-    return {"next_id": run_id, "note": f"{len(items)} vídeos reais para modelar em seguida e {len(res['territories'])} territórios."}
+    return {"next_id": run_id, "note": f"{len(items)} vídeos reais para modelar em seguida"
+                                       + (f" (ampliei para {days} dias: nos seus {p['max_days']} dias veio pouca coisa)."
+                                          if result["widened"] else ".")}
 
 
 def runs(profile_id: int) -> list[dict]:

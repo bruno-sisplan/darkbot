@@ -731,7 +731,9 @@ já calculada; e comentários do vídeo original. O autocompletar mostra no máx
 
 Regras: use só os dados e cite os números em linguagem simples (vídeos do nicho ganhando views, views por hora,
 quantos canais já fizeram, o que se busca); NUNCA cite a nota 0-1 nem "procura de 0,xx"; nada genérico; procura alta com oferta zero é o melhor sinal; procura baixa
-é procura baixa (não invente interesse; não chame de oportunidade). O idioma do original não é oportunidade. Oferta: "livre" = ninguém fez, "pouca" = 1 ou 2 canais fizeram, "saturada" = 3
+é procura baixa (não invente interesse; não chame de oportunidade). O idioma do original não é oportunidade, nem idioma
+saturado. Dublagem automática do original NÃO conta como oferta (só vale vídeo nativo na língua). Fale SÓ dos mercados de "Analise estes": não cite,
+não compare e não recomende nenhum outro idioma (nem como "aberto", "vale atenção" ou "a observar"). Oferta: "livre" = ninguém fez, "pouca" = 1 ou 2 canais fizeram, "saturada" = 3
 ou mais; use exatamente esses termos (não chame "pouca" de saturada). Português do Brasil, frases curtas, o editor não é técnico.
 - summary: 2 a 3 frases: onde está a melhor oportunidade e por quê, com números.
 - notes: para cada mercado em "Analise estes": c = o código do idioma exatamente como veio; why = uma frase com o
@@ -755,7 +757,7 @@ class CountryReport(BaseModel):
 
 def countries_report(video_id: str, text: str, refresh: bool = True) -> dict:
     target = f"video:{video_id}:" + hashlib.sha1(text.encode()).hexdigest()[:12]
-    return _run("paises:v3", target, config.AI_MODEL_FAST, _COUNTRIES_SYSTEM, text, CountryReport,
+    return _run("paises:v5", target, config.AI_MODEL_FAST, _COUNTRIES_SYSTEM, text, CountryReport,
                 max_tokens=2500, refresh=refresh)
 
 

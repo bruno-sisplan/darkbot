@@ -186,3 +186,27 @@ def search(c: httpx.Client, query: str, sort: str = "relevancia", upload: str | 
     if pages > 1:
         _paginate(c, "search", data.get("contents", {}), col, pages, hl, gl)
     return [(vid, v["title"]) for vid, v in col.found.items()]
+
+
+_AUDIO = re.compile(r'"audioTrack":\{"displayName":"([^"]*)","id":"([A-Za-z]{2,3})[^"]*"')
+
+
+def audio_langs(c: httpx.Client, video_id: str) -> dict[str, str]:
+    """Faixas de áudio do vídeo: {idioma: "original" | "dublado"}. O YouTube (ou o canal) pode dublar o vídeo em
+    outras línguas: quem fala essa língua ouve o vídeo nela, então ali o vídeo JÁ EXISTE (não é mercado livre)."""
+    try:
+        html = c.get("https://www.youtube.com/watch", params={"v": video_id, "hl": "en"},
+                     headers={"Accept-Language": "en"}).text
+    except httpx.HTTPError as e:
+        print(f"[youtube_web] faixas de áudio de {video_id}: {e}")
+        return {}
+    finally:
+        time.sleep(PAUSE_S)
+    out: dict[str, str] = {}
+    for name, code in _AUDIO.findall(html):
+        code = code.lower()
+        if "original" in name.lower():
+            out[code] = "original"
+        else:
+            out.setdefault(code, "dublado")
+    return out

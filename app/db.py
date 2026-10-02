@@ -202,6 +202,13 @@ CREATE TABLE IF NOT EXISTS next_runs (
     created_at      TEXT
 );
 
+-- Radar do zero: cada varredura de nichos (resultado completo em JSON).
+CREATE TABLE IF NOT EXISTS radar_runs (
+    id         INTEGER PRIMARY KEY,
+    result     TEXT,
+    created_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_sightings_video ON sightings(video_id);
 CREATE INDEX IF NOT EXISTS idx_runs_profile ON runs(profile_id);
 CREATE INDEX IF NOT EXISTS idx_videos_channel ON videos(channel_id);

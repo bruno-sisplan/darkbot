@@ -86,6 +86,7 @@ app/
   ai_label.py           selo "gerado por IA" do YouTube (lê a página do vídeo)
   research.py           pesquisa de mercado (descoberta em camadas, período, comentários, relatório)
   malandro.py           Método Malandro (em que línguas ninguém fez o vídeo)
+  radar.py              Radar do zero: nichos com oportunidade fresca entre canais dark de qualquer tema
   proximos.py           Próximos vídeos: modelados, DNA do canal, mapa de território, vídeos reais para modelar, fila
   viral.py              Meus parâmetros de viral (Configurações): a régua do app inteiro
   youtube_web.py        páginas públicas do YouTube sem navegador (sugeridos, busca)
@@ -541,6 +542,77 @@ de Noé) e das pesquisas que "abriam o leque" demais (buscas aprendidas e varia�
   exemplos como critério inteiro e deixava "comida amish" com nota 0; corrigido para "o nicho é o assunto". Resultado:
   90 de 95 títulos com amish/menonita com nota ≥ 2, 179 fora do nicho cortados; dos 41 que batem a régua, 5 são do
   nicho (os outros eram a home fria).
+
+**Malandro e Países: dublagem do YouTube (02/10/2026):** o usuário rodou o Malandro no vídeo dos menonitas (original em
+espanhol) e viu "Português: ninguém fez", mas no YouTube dele o vídeo aparecia com título em português. Causa: o canal usa
+o **áudio em vários idiomas** do YouTube (`isAutoDubbed`): o MESMO vídeo toca dublado em PT, EN e AR e mostra o título
+traduzido; o Malandro só olhava o idioma original. E Países punha o inglês (saturado) como mercado nº 1, o resumo da IA
+recomendava idioma com procura zero e os países vinham ordenados pelo autocompletar (Nigéria antes dos EUA).
+- `youtube_web.audio_langs` (página do vídeo, sem cota): `{idioma: "original" | "dublado"}` lido de `"audioTrack"`.
+  `youtube_api.fetch_videos` agora lê `localizations` (mesma cota) → `title_langs` (títulos traduzidos pelo canal).
+- **Regra do editor (decidida com o sócio): dublagem NÃO ocupa a língua.** Só conta quem fez o vídeo NATIVO naquela
+  língua ("se ninguém fez na língua, pode ir de malandragem"). A 1ª versão desta correção marcava as línguas dubladas
+  como ocupadas e foi desfeita no mesmo dia. Hoje a dublagem é só INFORMAÇÃO: `malandro.run` guarda `original_dubs`,
+  `original_titles` e, por língua, `original_dub`, `original_title` e `dubbed` (concorrentes dublados nela); a contagem
+  de canais usa só vídeo nativo (`c["lang"] == lang`) + o original no idioma dele.
+- `paises.run`: não é oportunidade o idioma do original (`covered`) e o idioma saturado (score 0; antes o inglês saturado
+  aparecia como mercado nº 1). Países em ordem fixa de mercado (quem tem buscas primeiro; antes a Nigéria vinha antes
+  dos EUA). IA `paises:v5` só fala dos mercados de "Analise estes" e sabe que dublagem não é oferta. Sem nenhum mercado:
+  quadro "Nenhum mercado com procura e livre agora" (sem repetir o resumo).
+- Interface: aviso "O vídeo original tem dublagem automática em… Não conta como já feito" e marcação "original tem
+  dublagem" por língua. O botão do Malandro mostra "Rodando…" e o card de progresso das tarefas fica acima do painel da
+  prévia (o usuário não via que estava rodando).
+- Reteste (cópia do banco, vídeo dos menonitas): 11 línguas livres (PT incluso; dublagem em PT/EN/AR só como aviso);
+  inglês saturado com 5 canais nativos; Países: nenhum mercado com procura e livre. US$ 0,0025.
+
+**Próximos vídeos v4 + período que amplia sozinho (02/10/2026):** o usuário achou o Próximos "nada a ver" (perfil
+"teste", 1 modelado: menonitas): veio uma entrevista (canal NÃO dark, 0,2x) e vídeos do MESMO assunto do modelado. E o
+"Achar parecidos" trouxe só 3 vídeos, todos do mesmo canal. Pedidos dele: "abranger, não afunilar"; próximos = vídeos do
+nicho viralizados ou com ótimo potencial, "quanto mais recente e maior visu, melhor"; manter os 7 dias dos parâmetros.
+Causas: o `_cards` do Próximos desligava o "só dark"; com 7 dias + 3 mil views um nicho pequeno quase não tem vídeo
+(pesquisa: 22 buscas → 17 vídeos; Próximos: 5 candidatos); a lógica era "em alta no nicho", não "o próximo".
+- **Próximos v4** (`proximos.run`, `next:v4`, versão 4 do resultado): parte dos vídeos que o editor MODELOU (até 3, os
+  mais recentes; sem modelado com link = erro pedindo o link). Candidatos com origem (`via`): `origem` (uploads do canal
+  de onde ele copiou), `a_seguir` (sugeridos do vídeo modelado, como o público dele), `mesmo` (uploads dos canais que
+  fizeram o mesmo vídeo, do Malandro) e `assunto` (buscas do `seed_profile` do modelado, no idioma dele + no do canal do
+  editor). Números primeiro (`_ensure` grava + `jobs.enrich`), régua sem dark até 90 dias, juiz de **duplicata**
+  (`dup:v1`, Haiku: sai só a MESMA HISTÓRIA de um modelado; a mesma fórmula com outro assunto fica) e juiz de nicho com o
+  critério do Descobrir (`research.niche_topic`; assunto = nicho do perfil, senão temas do DNA, senão temas dos
+  modelados). Depois classifica os canais e aplica a régua completa (só dark de verdade), **no máximo 2 por canal**, e se
+  vier menos de 12 amplia o período (30, 90 dias; `widened`, `days_used`). O Sonnet escolhe até 10 e explica a relação
+  com o vídeo modelado; a lista final sai **por views por hora** (os do período antes). Sem mapa de território.
+  DNA desatualizado é refeito no começo. Tela: "A partir de: …", funil (olhados → do nicho → viralizando), marcação de
+  onde veio e "fora do período". Teste (cópia do banco, 6 modelados amish/menonitas): 299 olhados → 23 do nicho → 8
+  sugestões de 6 canais, todas amish, ordenadas por views/h. ~40 s, US$ 0,03 a 0,045.
+  O 1º critério de nicho ("o mesmo público destes vídeos") deixava passar só 8 de 99; com "o nicho é o assunto", 23 a 26.
+  O juiz de "mesmo vídeo" do Malandro (`same:v1`) tirava as variações (rarámuris), por isso o juiz próprio de duplicata.
+- **Pesquisa amplia o período** (`research.run`, `WIDEN_DAYS = (30, 90)`, `MIN_RESULTS = 15`): se depois da descoberta
+  houver menos de 15 vídeos do assunto (nota ≥ 2), roda a descoberta de novo com 30 dias (e 90 se precisar), grava o
+  novo período em `research.max_age_days`. O que saiu só por ser velho volta para o juiz (`_Pool.reopen_old`, marca
+  `old` no pré-filtro). Teste ("Achar parecidos" no vídeo dos menonitas): 7 vídeos em 7 dias → 40 vídeos de 17 canais em
+  30 dias. 1min40, US$ 0,048.
+- **Descobrir amplia a lista** (`filteredVideos`, `WIDEN_DAYS`, `MIN_LIST = 10`): em "Só o que viraliza agora", se os
+  parâmetros trazem menos de 10 vídeos, mostra também até 30 (ou 90) dias, com aviso no topo (`#v-widen`) e marcação
+  "fora do período" (`outOfPeriod`). A ordem continua a dos parâmetros.
+
+**Radar do zero (02/10/2026):** o usuário pediu uma pesquisa "do zero" para quem está decidindo o nicho (canal novo ou
+perfil coringa): partir do que viraliza AGORA entre canais dark de QUALQUER tema, pela régua e avaliações do app, para
+depois montar um perfil nichado e afunilado. Escolhas dele: **PT + EN + ES** e **botão no Descobrir**.
+- `app/radar.py`, botão "Achar nichos do zero" (ao lado de Garimpar), painel na direita (`openRadar`, `#pv`), tabela
+  `radar_runs`, rotas `POST/GET /api/radar`, `GET /api/radar/{id}`, job `radar` cancelável.
+- Fluxo: 25 gêneros com busca larga fixa em PT/EN/ES (`GENRES`, sem IA) × (top por views no período + "hoje") × 2
+  páginas, sem cota (~150 buscas, ~3.500 vídeos) → números pela API (~70 unidades) → sem short, sem infantil, só
+  PT/EN/ES (`_in_langs`: idioma da API ou título quase todo em letras latinas; as buscas devolviam hindi, tâmil,
+  bengali...) e régua sem dark → os 300 com mais views por hora são gravados, `enrich` e canais classificados
+  (`classify_new_channels`) → régua completa (só dark) → no máximo 2 por canal → até 150 vão para o Sonnet (`radar:v1`)
+  agrupar em 6 a 12 nichos (nome, o que é, por que agora, concorrência, dificuldade de entrar, texto do nicho para o
+  perfil, 4 buscas para treinar, idiomas). Os números de cada nicho (vídeos, views/h mediana, canais, canais novos ≤ 180
+  dias) saem em código dos vídeos citados; nicho com 1 canal só sai. Ordem: views/h típico × log(quantidade) × (1 +
+  canais novos/canais) × concorrência.
+- "Criar perfil com este nicho": `POST /api/profiles` com o nicho preenchido (depois treinar ou garimpar).
+- Teste (cópia do banco): 3.568 vídeos olhados → 1.220 na régua → 135 dark → 9 nichos (arqueologia, relatos de terror,
+  dramas de bilionário disfarçado com 14 de 18 canais novos, fundo do mar, vida selvagem, história, China, Bíblia,
+  países). ~1min20, US$ 0,06 (a 1ª varredura, com mais canais para classificar, US$ 0,11).
 
 **Pendente com o usuário:**
 - Mandar o .exe para o colega e ver se funciona no PC dele (o `.exe` atual foi gerado ANTES da mensagem nova de "home vazia": gerar de novo antes de mandar).
