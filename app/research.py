@@ -5,12 +5,13 @@ recentes). Depois puxa os números pela API, confere o selo de IA, classifica os
 vídeos principais e, se pedido, gera o relatório com o Sonnet. Tudo fica guardado para reaproveitar
 (ex.: gerar títulos e descrições depois); nada é reprocessado.
 """
+import hashlib
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from . import ai, analytics, config, db, jobs, titles, youtube_api, youtube_web
+from . import ai, analytics, config, db, jobs, titles, viral, youtube_api, youtube_web
 
 # Buscas feitas para cada palavra-chave: (ordem, período, rótulo).
 SEARCHES = [
@@ -22,13 +23,47 @@ FOREIGN_SEARCHES = SEARCHES[:2]   # em outros idiomas: o recente e o top do mês
 FOREIGN_QUERIES = 3               # buscas por idioma estrangeiro
 HISTORY_SEEDS = 5                 # vídeos do histórico que têm os sugeridos abertos
 DEEP_ROUNDS = 3             # camadas de "sugeridos dos sugeridos" (só a partir dos vídeos relevantes)
-PAGES_PER_ROUND = 10        # vídeos relevantes que têm os sugeridos abertos em cada camada
-COMPETITOR_CHANNELS = 8     # canais concorrentes que têm os uploads recentes lidos (1 unidade de cota cada)
-COMPETITOR_UPLOADS = 20
+PAGES_PER_ROUND = 12        # vídeos relevantes que têm os sugeridos abertos em cada camada (os que mais viralizam)
+COMPETITOR_CHANNELS = 15    # canais concorrentes que têm os uploads recentes lidos (1 unidade de cota cada)
+COMPETITOR_UPLOADS = 30
+# Páginas lidas de cada lista (o "carregar mais" do site, sem cota): ~20 vídeos por página.
+SEARCH_PAGES = {"views": 3, "data": 2, "relevancia": 2}
+FOREIGN_PAGES = 2
+SEED_RELATED_PAGES = 3      # sugeridos do vídeo de partida
+RELATED_PAGES = 2           # sugeridos de cada vídeo relevante nas camadas
+LEARN_QUERIES = 8           # buscas novas aprendidas com o que está viralizando (bola de neve)
 COMMENT_VIDEOS = 6          # vídeos que têm os comentários lidos
 COMMENTS_PER_VIDEO = 100
 REPORT_VIDEOS = 30          # vídeos que entram no relatório
 REPORT_COMMENTS = 15        # comentários por vídeo que entram no relatório
+
+
+def _vph(m: dict | None) -> float:
+    """Views por hora desde a postagem (números da API)."""
+    if not m or m.get("views") is None or not m.get("published_at"):
+        return 0.0
+    h = viral.hours_since(m["published_at"]) or 0
+    return m["views"] / max(h, 1)
+
+
+def _judge_topic(prof: dict, extra: str = "") -> str:
+    """Critério do juiz em dois níveis: a premissa (nota 3) e o NICHO inteiro (nota 2), para não deixar para trás
+    o que o mesmo público assiste com outro assunto ou premissa."""
+    return (f"NOTA 3 (concorrente direto): {prof['topic']} (premissa: {prof['angle']}; formato: {prof['format']}). "
+            f"NOTA 2 (mesmo nicho): qualquer vídeo de {prof['theme']} ou de temas vizinhos que o MESMO público assiste, "
+            f"mesmo com outra premissa ou outro formato. {extra}").strip()
+
+
+def _known_not_dark(channel_ids: set) -> set:
+    """Canais que já se sabe que NÃO são dark (classificação da IA ou marcação do editor)."""
+    ids = [c for c in channel_ids if c]
+    if not ids:
+        return set()
+    rows = db.rows(f"""SELECT channel_id, dark AS channel_dark, dark_conf AS channel_dark_conf,
+                              dark_manual AS channel_dark_manual, format AS channel_format, 0 AS channel_ai
+                       FROM channels WHERE channel_id IN ({','.join('?' * len(ids))})
+                         AND (dark IS NOT NULL OR dark_manual IS NOT NULL)""", ids)
+    return {r["channel_id"] for r in rows if analytics.is_dark(r) is False}
 
 
 def now_iso() -> str:
@@ -93,8 +128,13 @@ def run(job: jobs.Job, research_id: int, want_report: bool) -> dict:
             # Tradução não é automática (é o que mais custava): fica no botão "Traduzir títulos" e na prévia.
             if ai.enabled():
                 job.update(0.8, "IA classificando os canais dos vídeos relevantes...")
-                jobs.classify_new_channels(video_ids=[v for v, f in found.items() if (f.get("relevance") or 0) >= 2])
-        if not job.stopped():
+                vp = viral.get()
+                cands = [x["video_id"] for x in db.rows(
+                    f"SELECT video_id, views, published_at FROM videos WHERE video_id IN ({','.join('?' * len(found))})",
+                    list(found)) if (x["views"] or 0) >= vp["min_views"] * 0.5
+                    and (viral.hours_since(x["published_at"]) or 1e9) <= vp["max_days"] * 24]
+                jobs.classify_new_channels(video_ids=cands)
+        if want_report and not job.stopped():   # comentários só servem ao relatório (que é sob demanda)
             _fetch_comments(job, research_id)
 
         note = None
@@ -110,6 +150,7 @@ def run(job: jobs.Job, research_id: int, want_report: bool) -> dict:
         with db.tx() as con:
             con.execute("UPDATE research SET status=?, finished_at=?, videos_found=? WHERE id=?",
                         (status, now_iso(), len(videos), research_id))
+        send_to_discoveries(research_id)   # tudo num lugar só: os achados aparecem em Descobrir
         if job.stopped():
             note = f"Pesquisa cancelada: {len(videos)} vídeos guardados."
         direct = sum(1 for v in videos if (v.get("relevance") or 0) >= 3)
@@ -134,6 +175,55 @@ def _discover(job: jobs.Job, r: dict, research_id: int, pool: _Pool) -> None:
     primary = langs[0] if langs else "pt"
     seeds: list[str] = []          # vídeos de partida (sugeridos abertos já na 1ª rodada)
     topic = ""
+    max_days = r.get("max_age_days")
+    vp = viral.get()
+    # Abaixo disso o vídeo não vira oportunidade tão cedo: nem gasta IA (bem abaixo do mínimo e sem ritmo).
+    floor_views, floor_vph = vp["min_views"] * 0.3, 30
+    meta: dict[str, dict] = {}     # números da API de cada candidato (1 unidade de cota a cada 50 vídeos)
+
+    def prefilter(todo: list[tuple[str, str]]) -> list[tuple[str, str, str]]:
+        """Antes de pagar a IA: data e duração pela API (quase de graça). Short, vídeo removido e o que está fora do
+        período saem na hora (sairiam no fim de qualquer jeito). O resto vai para o juiz com canal e duração."""
+        need = [vid for vid, _ in todo if vid not in meta]
+        for m in youtube_api.fetch_videos(need, key) if need else []:
+            meta[m["video_id"]] = m
+        # Canal que já se sabe NÃO dark (classificado antes ou marcado pelo editor): com "só dark" nos parâmetros,
+        # o vídeo nunca aparece; não paga IA por ele.
+        not_dark = _known_not_dark({(meta.get(v) or {}).get("channel_id") for v, _ in todo}) if vp["only_dark"] else set()
+        keep = []
+        for vid, title in todo:
+            m = meta.get(vid)
+            age = analytics._age_days(m.get("published_at")) if m else None
+            if not m or (m.get("duration_s") or 0) <= config.SHORT_MAX_SECONDS or (max_days and (age or 0) > max_days) \
+                    or ((m.get("views") or 0) < floor_views and _vph(m) < floor_vph) or m.get("channel_id") in not_dark:
+                pool.items[vid]["relevance"] = 0
+                continue
+            keep.append((vid, m.get("title") or title,
+                         f"{(m.get('channel_title') or '?')[:40]} | {round((m.get('duration_s') or 0) / 60)} min"))
+        return keep
+
+    def judge(stage: str) -> None:
+        todo = pool.unjudged()
+        if not todo or job.stopped():
+            return
+        found_n = len(todo)
+        todo = prefilter(todo)
+        if not todo:
+            return
+        job.update(None, f"IA separando o que tem a ver ({len(todo)} vídeos no período, de {found_n} achados · {stage})...")
+        if not ai.enabled():
+            for vid, *_ in todo:
+                pool.items[vid]["relevance"] = 2
+            return
+        notes = ai.judge_relevance(topic, todo)
+        for vid, *_ in todo:
+            pool.items[vid]["relevance"] = notes.get(vid, 0)
+
+    def save_topic(prof: dict) -> None:
+        with db.tx() as con:
+            con.execute("UPDATE research SET topic=? WHERE id=?", (json.dumps(
+                {k: prof[k] for k in ("theme", "format", "angle", "topic", "variants")}, ensure_ascii=False),
+                research_id))
 
     with youtube_web.client() as c:
         # ---------------------------------------------------------------- 1. entender o ponto de partida
@@ -152,13 +242,9 @@ def _discover(job: jobs.Job, r: dict, research_id: int, pool: _Pool) -> None:
                 job.update(0.05, "IA entendendo o tema, o formato e o ângulo do vídeo...")
                 prof = ai.seed_profile(r["seed"], info["title"], info.get("channel_title") or "",
                                        info.get("description") or "", info.get("tags") or [], primary)
-                topic = (f"{prof['topic']} (tema: {prof['theme']}; formato: {prof['format']}; "
-                         f"ângulo: {prof['angle']}; vídeo de referência: \"{info['title']}\")")
+                topic = _judge_topic(prof, f"Vídeo de referência: \"{info['title']}\".")
                 keywords, variants = prof["queries"][:6], prof["variants"][:8]
-                with db.tx() as con:
-                    con.execute("UPDATE research SET topic=? WHERE id=?", (json.dumps(
-                        {k: prof[k] for k in ("theme", "format", "angle", "topic", "variants")}, ensure_ascii=False),
-                        research_id))
+                save_topic(prof)
             else:
                 keywords = [info["title"]]
                 topic = f"vídeos parecidos com \"{info['title']}\""
@@ -176,13 +262,33 @@ def _discover(job: jobs.Job, r: dict, research_id: int, pool: _Pool) -> None:
             for h in hist:
                 pool.add(h["video_id"], h["title"], "historico", 0)
             seeds = [h["video_id"] for h in hist[:HISTORY_SEEDS]]
-            if not keywords and ai.enabled():
-                job.update(0.05, "IA achando o centro do nicho pelo histórico...")
-                keywords = ai.history_keywords(f"history:{research_id}", [h["title"] for h in hist])
             topic = ("vídeos do mesmo nicho que o editor assistiu recentemente: "
                      + "; ".join(h["title"] for h in hist[:12]))
+            if ai.enabled():
+                job.update(0.05, "IA achando o centro do nicho pelo histórico...")
+                text = "Vídeos assistidos (os do topo são os mais recentes):\n" + "\n".join(f"- {h['title']}" for h in hist)
+                try:
+                    prof = ai.research_brief(f"history:{research_id}", "history", text, ai.LANGUAGES[primary][2])
+                    topic = _judge_topic(prof)
+                    keywords, variants = prof["queries"][:6], prof["variants"][:4]
+                    save_topic(prof)
+                except ai.AIError as e:
+                    print(f"[pesquisa] briefing do histórico: {e}")
         else:
             topic = "vídeos sobre: " + ", ".join(keywords)
+            if ai.enabled() and keywords:
+                job.update(0.04, "IA montando o briefing da pesquisa (tema, formato, buscas do público)...")
+                lang_name = ai.LANGUAGES[primary][2]
+                text = "O editor pesquisou: " + "; ".join(keywords)
+                target = "kw:" + hashlib.sha1(f"{lang_name}|{text.lower()}".encode()).hexdigest()[:16]
+                try:
+                    prof = ai.research_brief(target, "keyword", text, lang_name)
+                    topic = _judge_topic(prof, f"O editor pesquisou: {', '.join(keywords)}.")
+                    keywords = list(dict.fromkeys(keywords + prof["queries"]))[:8]   # as do editor vêm primeiro
+                    variants = prof["variants"][:6]
+                    save_topic(prof)
+                except ai.AIError as e:
+                    print(f"[pesquisa] briefing: {e}")
 
         with db.tx() as con:
             con.execute("UPDATE research SET keywords=? WHERE id=?",
@@ -208,14 +314,23 @@ def _discover(job: jobs.Job, r: dict, research_id: int, pool: _Pool) -> None:
         def do_search(item):
             lang, kw, (sort, upload, _via) = item
             lhl, lgl, _n = ai.LANGUAGES.get(lang, ai.LANGUAGES["pt"])
-            return youtube_web.search(c, kw, sort, upload, lhl, lgl)
+            pages = SEARCH_PAGES.get(sort, 2) if lang == primary else FOREIGN_PAGES
+            return youtube_web.search(c, kw, sort, upload, lhl, lgl, pages=pages)
+
+        def related_of(vid: str, pages: int):
+            """Sugeridos abertos como um visitante do país do vídeo (o mercado dele, não o da pesquisa)."""
+            m = meta.get(vid) or {}
+            code = lang_code(m.get("lang"), m.get("title") or "") if m else primary
+            vhl, vgl, _n = ai.LANGUAGES.get(code, ai.LANGUAGES[primary])
+            return youtube_web.related(c, vid, vhl, vgl, pages=pages)[1]
 
         job.update(0.1, f"Rodando {len(plan)} buscas e abrindo os sugeridos...")
         jobs_list = [("rel", s) for s in seeds] + [("search", p) for p in plan]
 
         def gather(item):
             kind, payload = item
-            return youtube_web.related(c, payload, hl, gl)[1] if kind == "rel" else do_search(payload)
+            return youtube_web.related(c, payload, hl, gl, pages=SEED_RELATED_PAGES)[1] if kind == "rel" \
+                else do_search(payload)
 
         for (kind, payload), results in zip(jobs_list, _parallel(job, jobs_list, gather)):
             for vid, title in results:
@@ -226,34 +341,49 @@ def _discover(job: jobs.Job, r: dict, research_id: int, pool: _Pool) -> None:
         for s in seeds:
             pool.items[s]["expanded"] = True
 
-        # ---------------------------------------------------------------- 3. juiz + aprofundar pelos relevantes
-        def judge(stage: str):
-            todo = pool.unjudged()
-            if not todo or job.stopped():
-                return
-            job.update(None, f"IA separando o que tem a ver ({len(todo)} vídeos · {stage})...")
-            if not ai.enabled():
-                for vid, _ in todo:
-                    pool.items[vid]["relevance"] = 2
-                return
-            notes = ai.judge_relevance(topic, todo)
-            for vid, _ in todo:
-                pool.items[vid]["relevance"] = notes.get(vid, 0)
-
+        # ---------------------------------------------------------------- 3. juiz + buscas aprendidas + camadas
         judge("1ª camada")
+
+        # Bola de neve: o que está viralizando na 1ª camada ensina o que buscar a seguir (como um pesquisador faz).
+        hot = sorted([v for v, it in pool.items.items() if (it["relevance"] or 0) >= 2 and v in meta],
+                     key=lambda v: -_vph(meta[v]))[:30]
+        if hot and ai.enabled() and not job.stopped():
+            job.update(0.14, "IA aprendendo com o que está viralizando: buscas novas...")
+            done = list(dict.fromkeys(kw for _l, kw, _s in plan))
+            try:
+                learned = ai.learn_queries(
+                    topic, done, [(lang_code(meta[v].get("lang"), meta[v]["title"]), meta[v]["title"], round(_vph(meta[v])))
+                                  for v in hot], list(dict.fromkeys([primary] + langs)), LEARN_QUERIES)
+            except ai.AIError as e:
+                print(f"[pesquisa] buscas aprendidas: {e}")
+                learned = []
+            if learned and not job.stopped():
+                lplan = [(l, q, (sort, var_upload, "busca:aprendida")) for l, q in learned
+                         for sort in ("views", "relevancia")]
+                job.update(0.15, f"Rodando {len(lplan)} buscas aprendidas: {', '.join(q for _l, q in learned[:4])}...")
+                for item, results in zip(lplan, _parallel(job, lplan, do_search)):
+                    for vid, title in results:
+                        pool.add(vid, title, "busca:aprendida", 1, item[1])
+                keywords += [q for _l, q in learned]
+                with db.tx() as con:
+                    con.execute("UPDATE research SET keywords=? WHERE id=?",
+                                (json.dumps(keywords + variants, ensure_ascii=False), research_id))
+                judge("buscas aprendidas")
+
         for depth in range(2, 2 + DEEP_ROUNDS):
             if job.stopped():
                 break
+            # Abre primeiro os sugeridos dos que mais viralizam agora (é onde o algoritmo está empurrando).
             frontier = sorted(
                 [(vid, it) for vid, it in pool.items.items() if not it["expanded"] and (it["relevance"] or 0) >= 2],
-                key=lambda x: (-(x[1]["relevance"] or 0), x[1]["position"]))[:PAGES_PER_ROUND]
+                key=lambda x: (-_vph(meta.get(x[0])), -(x[1]["relevance"] or 0)))[:PAGES_PER_ROUND]
             if not frontier:
                 break
             job.update(0.15 + 0.08 * (depth - 1), f"Entrando nos sugeridos de {len(frontier)} vídeos relevantes "
                                                    f"(camada {depth})...")
             for vid, _ in frontier:
                 pool.items[vid]["expanded"] = True
-            for results in _parallel(job, [vid for vid, _ in frontier], lambda v: youtube_web.related(c, v, hl, gl)[1]):
+            for results in _parallel(job, [vid for vid, _ in frontier], lambda v: related_of(v, RELATED_PAGES)):
                 for vid, title in results:
                     pool.add(vid, title, "sugerido", depth)
             judge(f"camada {depth}")
@@ -263,12 +393,15 @@ def _discover(job: jobs.Job, r: dict, research_id: int, pool: _Pool) -> None:
         return
     rel = pool.relevant(2)
     job.update(0.42, "Identificando os canais concorrentes...")
-    meta = {v["video_id"]: v for v in youtube_api.fetch_videos(list(rel), key)}
+    need = [vid for vid in rel if vid not in meta]   # quase tudo já veio no pré-filtro
+    for m in youtube_api.fetch_videos(need, key) if need else []:
+        meta[m["video_id"]] = m
     count: dict[str, int] = {}
     for vid in rel:
-        cid = (meta.get(vid) or {}).get("channel_id")
-        if cid:
-            count[cid] = count.get(cid, 0) + (2 if rel[vid]["relevance"] >= 3 else 1)
+        m = meta.get(vid) or {}
+        if m.get("channel_id"):   # concorrente direto vale mais; vídeo explodindo agora vale mais ainda
+            w = (2 if rel[vid]["relevance"] >= 3 else 1) * (2 if _vph(m) >= 100 else 1)
+            count[m["channel_id"]] = count.get(m["channel_id"], 0) + w
     top_channels = [cid for cid, _ in sorted(count.items(), key=lambda x: -x[1])[:COMPETITOR_CHANNELS]]
     if top_channels and not job.stopped():
         job.update(0.45, f"Lendo os uploads recentes de {len(top_channels)} canais concorrentes...")
@@ -277,27 +410,21 @@ def _discover(job: jobs.Job, r: dict, research_id: int, pool: _Pool) -> None:
         for ups in uploads:
             for vid, title in ups:
                 pool.add(vid, title, "canal:recente", 1)
-        todo = pool.unjudged()
-        if todo and ai.enabled():
-            job.update(0.47, f"IA separando o que tem a ver ({len(todo)} uploads dos concorrentes)...")
-            notes = ai.judge_relevance(topic, todo)
-            for vid, _ in todo:
-                pool.items[vid]["relevance"] = notes.get(vid, 0)
+        judge("uploads dos concorrentes")
 
 
 def search_plan(max_age_days: int | None):
-    """Buscas por período: (buscas no idioma principal, buscas nos outros idiomas, filtro das variações)."""
-    if max_age_days and max_age_days <= 7:
-        s = [("data", "semana", "busca:recente"), ("views", "semana", "busca:top-semana"),
-             ("relevancia", "semana", "busca:relevante")]
-        return s, s[:2], "semana"
-    if max_age_days and max_age_days <= 31:
-        s = [("data", "semana", "busca:recente"), ("views", "mes", "busca:top-mes"),
-             ("relevancia", "mes", "busca:relevante")]
-        return s, s[:2], "mes"
-    if max_age_days and max_age_days <= 366:
-        return SEARCHES, FOREIGN_SEARCHES, "ano"
-    return SEARCHES, FOREIGN_SEARCHES, None
+    """Buscas pelo período dos parâmetros: (buscas no idioma principal, buscas nos outros idiomas, filtro das variações).
+
+    Tudo com o filtro de data do YouTube no período e o MAIS VISTO primeiro: o que está viralizando agora.
+    Para períodos curtos entra também "hoje" por views (o que está explodindo nas últimas horas)."""
+    up = viral.upload_filter(max_age_days)
+    if up is None:
+        return SEARCHES, FOREIGN_SEARCHES, None
+    s = [("views", up, "busca:top"), ("data", up, "busca:recente"), ("relevancia", up, "busca:relevante")]
+    if max_age_days and max_age_days <= 7 and up != "hoje":
+        s.insert(1, ("views", "hoje", "busca:top-hoje"))
+    return s, s[:2], up
 
 
 def _apply_period(research_id: int, max_age_days: int | None) -> None:
@@ -310,6 +437,31 @@ def _apply_period(research_id: int, max_age_days: int | None) -> None:
                (SELECT video_id FROM videos WHERE published_at IS NOT NULL AND
                 julianday('now') - julianday(published_at) > ?)""", (research_id, max_age_days))
         db.purge_orphans(con)
+
+
+def send_to_discoveries(research_id: int) -> dict:
+    """A pesquisa vira uma coleta (marcada como pesquisa) do perfil dela: os vídeos do tema aparecem em Descobrir,
+    onde os parâmetros de viral do editor filtram e ordenam. Refazer atualiza a mesma coleta."""
+    r = db.row("SELECT * FROM research WHERE id=?", (research_id,))
+    # Abrangente: tudo o que o juiz achou do nicho (nota 1 = mesma área, outro tema) vai para Descobrir, onde os
+    # parâmetros de viral e o "só dark" filtram. Muitas oportunidades boas são do nicho sem ser o mesmo assunto.
+    good = {v["video_id"] for v in analytics.research_videos(research_id) if (v.get("relevance") or 2) >= 1}
+    vids = [v for v in db.rows("SELECT video_id, position FROM research_videos WHERE research_id=? ORDER BY position",
+                               (research_id,)) if v["video_id"] in good]
+    old = db.row("SELECT id FROM runs WHERE research_id=?", (research_id,))
+    ts = now_iso()
+    with db.tx() as con:
+        if old:
+            run_id = old["id"]
+            con.execute("DELETE FROM sightings WHERE run_id=?", (run_id,))
+            con.execute("UPDATE runs SET finished_at=?, videos_found=? WHERE id=?", (ts, len(vids), run_id))
+        else:
+            run_id = con.execute(
+                "INSERT INTO runs(profile_id, started_at, finished_at, status, logged_in, videos_found, source, research_id) "
+                "VALUES(?, ?, ?, 'done', 1, ?, 'research', ?)", (r["profile_id"], ts, ts, len(vids), research_id)).lastrowid
+        con.executemany("INSERT OR IGNORE INTO sightings(run_id, video_id, position, surface) VALUES(?,?,?, 'research')",
+                        [(run_id, v["video_id"], i) for i, v in enumerate(vids, 1)])
+    return {"run_id": run_id, "videos": len(vids), "existing": bool(old)}
 
 
 def _save(research_id: int, found: dict) -> None:
@@ -361,9 +513,10 @@ def _top(research_id: int, n: int) -> list[dict]:
 def _fetch_comments(job: jobs.Job, research_id: int) -> None:
     """Comentários dos vídeos com mais oportunidade (cada vídeo uma vez só; 1 unidade de cota por vídeo)."""
     key = jobs.youtube_api_key()
-    todo = [v for v in _top(research_id, COMMENT_VIDEOS * 3)
+    p = viral.get()
+    todo = [v for v in _top(research_id, COMMENT_VIDEOS * 4)
             if v["via"] == "semente" or ((v.get("relevance") or 2) >= 2 and v["is_dark"])]
-    todo = todo[:COMMENT_VIDEOS]
+    todo = sorted(todo, key=lambda v: (v["via"] != "semente", not viral.passes(v, p)))[:COMMENT_VIDEOS]
     fetched = {r["video_id"] for r in db.rows(
         "SELECT video_id FROM videos WHERE comments_fetched_at IS NOT NULL AND video_id IN (%s)"
         % ",".join("?" * len(todo)), [v["video_id"] for v in todo])} if todo else set()
@@ -395,8 +548,10 @@ def build_payload(research_id: int) -> str:
     r = db.row("SELECT * FROM research WHERE id=?", (research_id,))
     all_videos = analytics.research_videos(research_id)
     # Só o que tem a ver com o tema (nota 2 ou 3 do juiz; pesquisas antigas não têm nota e entram).
-    on_topic = [v for v in all_videos if (v.get("relevance") or 2) >= 2 and v["potential"]] or \
-        [v for v in all_videos if (v.get("relevance") or 2) >= 2] or all_videos
+    p = viral.get()
+    on_topic = [v for v in all_videos if (v.get("relevance") or 2) >= 2 and viral.passes(v, p)]
+    below = not on_topic   # nada bate a régua: o relatório usa os melhores mesmo assim, e a IA fica sabendo
+    on_topic = on_topic or [v for v in all_videos if (v.get("relevance") or 2) >= 2 and v["potential"]] or all_videos
     dark = [v for v in on_topic if v["is_dark"]] or on_topic
     top = sorted([v for v in dark if v["score"] is not None], key=lambda v: v["score"], reverse=True)[:REPORT_VIDEOS]
     if len(top) < 5:
@@ -405,18 +560,20 @@ def build_payload(research_id: int) -> str:
     lines = [
         f"# Pesquisa: {r['label']}",
         f"Origem: {'vídeo de referência [' + r['seed'] + ']' if r['kind'] == 'video' else 'histórico do perfil (o que o editor assistiu)' if r['kind'] == 'history' else 'palavras-chave'}",
-        *([f"O que o editor procura (definido a partir do vídeo de referência): {json.loads(r['topic'])['topic']}"]
-          if r.get("topic") else []),
+        *([f"O que conta como concorrente: {t['topic']}", f"Tema: {t['theme']} · formato: {t['format']} · "
+           f"premissa: {t['angle']}"] if (t := json.loads(r["topic"]) if r.get("topic") else None) else []),
         f"Buscas usadas: {', '.join(json.loads(r['keywords'] or '[]')) or '-'}",
-        f"Idiomas pesquisados: {', '.join(ai.LANGUAGES[l][2] for l in json.loads(r['langs'] or '[\"pt\"]') if l in ai.LANGUAGES)}",
+        f"Idiomas pesquisados: {', '.join(ai.LANGUAGES[l][2] for l in (json.loads(r['langs'] or 'null') or ['pt']) if l in ai.LANGUAGES)}",
         f"Idioma do canal do editor: {channel_lang()}",
-        f"Período: {'últimos ' + str(r['max_age_days']) + ' dias' if r.get('max_age_days') else 'qualquer data'}",
+        f"Régua de viral do editor (o que conta como viralizando agora): {viral.describe(p)}",
         f"Vídeos encontrados: {len(all_videos)} (dark: {len([v for v in all_videos if v['is_dark']])}; "
-        f"com potencial e no tema: {len(on_topic)}). "
-        f"Abaixo, os {len(top)} com mais oportunidade (multiplicador ponderado pela recência).",
+        f"no tema e dentro da régua: {0 if below else len(on_topic)}).",
+        ("ATENÇÃO: nenhum vídeo bate a régua do editor; abaixo estão os melhores do tema mesmo assim. Diga isso no "
+         "summary e seja cauteloso." if below else
+         f"Abaixo, os {len(top)} que mais ganham views por hora dentro da régua (do mais forte para o mais fraco)."),
         "",
         "## Vídeos (id | título | canal | idioma | relevância 3=direto 2=tema | formato do canal | selo IA | views "
-        "| inscritos | mult | idade em dias | views/dia | duração min)",
+        "| views por hora | inscritos | mult | idade em horas | duração min)",
     ]
     for v in top:
         lines.append(" | ".join([
@@ -424,8 +581,8 @@ def build_payload(research_id: int) -> str:
                                                    and v["title_pt"] != v["title"] else "")).replace("|", "/"),
             (v["channel_title"] or "").replace("|", "/"), (v["lang"] or "?"), str(v.get("relevance") or "?"),
             ai.FORMAT_LABELS.get(v["channel_format"] or "", "?"), "sim" if v["channel_ai"] else "não",
-            _fmt_n(v["views"]), _fmt_n(v["subs"]), f"{v['multiplier']}x", str(round(v["age_days"] or 0)),
-            _fmt_n(v["views_day"]), str(round((v["duration_s"] or 0) / 60)),
+            _fmt_n(v["views"]), _fmt_n(v.get("views_hour")), _fmt_n(v["subs"]), f"{v['multiplier']}x",
+            str(round(v.get("age_hours") or 0)), str(round((v["duration_s"] or 0) / 60)),
         ]))
 
     pat = titles.analyze(dark)
@@ -483,50 +640,9 @@ def translate_foreign(video_ids: list[str]) -> int:
 
 
 def report_job(job: jobs.Job, research_id: int) -> dict:
+    """Relatório sob demanda: lê os comentários dos melhores vídeos (se ainda não leu) e escreve."""
+    _fetch_comments(job, research_id)
     job.update(0.2, "IA escrevendo o relatório (pode levar 1 a 2 minutos)...")
     make_report(research_id, refresh=True)
     job.update(1.0, "Relatório pronto")
     return {"research_id": research_id}
-
-
-def variations_payload(video_id: str) -> str:
-    """Dados para a IA estimar a chance de cada variação viralizar: o vídeo, vídeos parecidos com números reais
-    (das pesquisas que têm esse vídeo), idiomas onde já foi feito (Método Malandro) e comentários do público."""
-    from . import malandro
-    v = analytics.video_detail(video_id)
-    if not v:
-        raise RuntimeError("Vídeo não encontrado.")
-    lines = [
-        f"# Vídeo que viralizou: {v['title']}",
-        f"Canal: {v['channel_title']} ({_fmt_n(v['subs'])} inscritos) · {_fmt_n(v['views'])} views · "
-        f"viralizou {v['multiplier']}x · postado há {round(v['age_days'] or 0)} dias · idioma {v['lang'] or '?'}",
-    ]
-    prof = ai.cached(ai.SEED_KIND, f"video:{video_id}")
-    if prof:
-        lines.append(f"Assunto: {prof['theme']} · Tipo: {prof['format']} · Gancho: {prof['angle']}")
-
-    rids = [r["research_id"] for r in db.rows("SELECT DISTINCT research_id FROM research_videos WHERE video_id=?",
-                                              (video_id,))]
-    similar: dict[str, dict] = {}
-    for rid in rids:
-        for x in analytics.research_videos(rid):
-            if (x.get("relevance") or 2) >= 2 and x["video_id"] != video_id and x["multiplier"] is not None:
-                similar[x["video_id"]] = x
-    top = sorted(similar.values(), key=lambda x: -(x["score"] or 0))[:30]
-    if top:
-        lines += ["", "## Vídeos parecidos (título | idioma | viralizou | views | dias desde que postou)"]
-        lines += [f"- {x['title']} | {x['lang'] or '?'} | {x['multiplier']}x | {_fmt_n(x['views'])} | "
-                  f"{round(x['age_days'] or 0)}" for x in top]
-    else:
-        lines += ["", "(Sem vídeos parecidos pesquisados ainda: estime com cuidado.)"]
-
-    mal = malandro.get(video_id)
-    if mal:
-        lines += ["", "## Em que idiomas esse vídeo já foi feito (Método Malandro)"]
-        lines += [f"- {l['name']}: {l['channels']} canal(is) fizeram ({l['status']})" for l in mal["langs"]]
-
-    cms = top_comments(video_id, 12)
-    if cms:
-        lines += ["", "## Comentários mais curtidos do vídeo"]
-        lines += [f"- ({c['likes']}) {' '.join(c['text'].split())[:200]}" for c in cms]
-    return "\n".join(lines)

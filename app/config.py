@@ -69,8 +69,8 @@ TASK_TOKENS = {
     "analise": ("Análise de um vídeo", {"smart": (3500, 2500)}),
     "variacoes": ("Ideias de variações", {"smart": (3000, 2200)}),
     "malandro": ("Método Malandro", {"fast": (6500, 1800)}),
-    "proximos": ("Meu canal: mapa e próximos vídeos", {"fast": (11500, 2700), "smart": (5500, 2800)}),
-    "dna": ("Meu canal: DNA do canal", {"smart": (900, 450)}),
+    "proximos": ("Próximos vídeos: vídeos para modelar e mapa", {"fast": (11500, 2700), "smart": (5500, 2800)}),
+    "dna": ("Próximos vídeos: DNA do canal", {"smart": (900, 450)}),
 }
 # "Potencial": o vídeo furou a própria base OU está ganhando tração. O resto é ruído na pesquisa.
 POTENTIAL_MIN_MULT = 1.0

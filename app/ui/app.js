@@ -6,7 +6,8 @@ const state = {
   profiles: [],
   videos: [],
   channels: [],
-  vSort: { key: "multiplier", dir: -1 },
+  vSort: { key: null, dir: -1 },   // null = a ordem dos parâmetros de viral
+  viral: null, viralInfo: null,
   cSort: { key: "best_multiplier", dir: -1 },
   vLimit: 150,
   watching: new Set(),
@@ -99,6 +100,32 @@ const FORMAT_TIP = {
 };
 const fmtUSD = (x) => `US$ ${(x || 0).toFixed(x >= 0.1 ? 2 : 4).replace(".", ",")}`;
 
+// Meus parâmetros de viral (Configurações): a régua do app inteiro. Mesma conta do servidor (app/viral.py).
+const SORT_KEY = { vph: "views_hour", views: "views", mult: "multiplier" };
+const viralSortKey = () => SORT_KEY[state.viral?.sort] || "views_hour";
+function passesViral(v, p = state.viral) {
+  if (!p) return true;
+  const age = v.age_days ?? (v.age_hours != null ? v.age_hours / 24 : null);
+  if (age == null || age > p.max_days) return false;
+  if ((v.views || 0) < p.min_views) return false;
+  if (p.min_vph && (v.views_hour || 0) < p.min_vph) return false;
+  if (p.min_mult && (v.multiplier || 0) < p.min_mult) return false;
+  if (p.max_subs && (v.subs == null || v.subs > p.max_subs)) return false;
+  if (p.only_dark && v.is_dark === false) return false;
+  return true;
+}
+async function loadViral() {
+  state.viralInfo = await api("/api/viral");
+  state.viral = state.viralInfo.params;
+  renderParamsChip();
+}
+function renderParamsChip() {
+  const i = state.viralInfo;
+  $("#params-chip").innerHTML = `<span class="pc-label">Seus parâmetros</span>
+    <span class="pc-text">${esc(i.text)} · ordem: ${esc((i.sorts[i.params.sort] || "").split(" (")[0].toLowerCase())}</span>
+    <span class="link" data-goto="settings" title="Mudar o que conta como viralizando agora">editar</span>`;
+}
+
 // Marcações do canal: selo de IA do YouTube e formato classificado pela IA.
 function channelTags(v) {
   const out = [];
@@ -110,21 +137,19 @@ function channelTags(v) {
   return out;
 }
 
-// Botão "pesquisar a partir deste vídeo" (usado nas tabelas).
-const seedBtn = (id) => `<button class="icon-btn seed-btn" data-seed="${id}" title="Pesquisar vídeos parecidos com este">
-  <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/><path d="M11 8.5v5M8.5 11h5"/></svg></button>`;
+// "Achar parecidos" (prévia): pesquisa a partir do vídeo.
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-seed]");
   if (!b) return;
   e.stopPropagation();
-  startResearch({ kind: "video", seed: b.dataset.seed, report: true });
+  startResearch({ kind: "video", seed: b.dataset.seed });
 }, true);
 
 // Marcações de novidade: canal novo e vídeo recente.
 function newTags(v) {
   const t = [];
   if (v.channel_age_days != null && v.channel_age_days <= 180) t.push(`<span class="tag new" title="Canal criado há ${ageLong(v.channel_age_days)} (canal novo indo bem = tem espaço no nicho)">Canal novo · ${fmtAge(v.channel_age_days)}</span>`);
-  if (v.age_days != null && v.age_days <= 7) t.push(`<span class="tag fresh" title="Postado há ${ageLong(v.age_days)}">Recente</span>`);
+  if (v.age_days != null && v.age_days <= 2) t.push(`<span class="tag fresh" title="Postado há ${ageLong(v.age_days)}">Recente</span>`);
   return t;
 }
 
@@ -147,7 +172,7 @@ function rowActions(v) {
       title="${v.is_dark ? "Marcar: este canal NÃO é dark (sai do filtro e a IA aprende)" : "Marcar: este canal É dark"}">
       ${v.is_dark ? `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M6 6l12 12"/></svg>`
         : `<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>`}</button>` : ""}
-    ${modeledBtn(v.video_id)}${seedBtn(v.video_id)}</div>`;
+    ${modeledBtn(v.video_id)}</div>`;
 }
 
 // Ações globais (tabelas, prévia): ocultar vídeo e corrigir "dark" do canal.
@@ -171,8 +196,6 @@ document.addEventListener("click", async (e) => {
 
 async function afterCorrection() {
   await loadVideos();
-  if ($("#page-research").classList.contains("active") && R.current != null) openResearch(R.current, true);
-  if ($("#page-channels").classList.contains("active")) loadChannels();
   if (!$("#pv").hidden && PV.id) openPreview(PV.id, true);
 }
 
@@ -180,18 +203,14 @@ const openYT = (path) => api("/api/open-url", { method: "POST", body: { url: `ht
 
 // ---------------------------------------------------------------- navegação
 
-$$(".nav-item").forEach((b) =>
-  b.addEventListener("click", () => {
-    $$(".nav-item").forEach((x) => x.classList.toggle("active", x === b));
-    $$(".page").forEach((p) => p.classList.toggle("active", p.id === `page-${b.dataset.page}`));
-    if (b.dataset.page === "profiles") loadProfiles();
-    if (b.dataset.page === "channels") loadChannels();
-    if (b.dataset.page === "settings") loadSettings();
-    if (b.dataset.page === "titles") loadTitles();
-    if (b.dataset.page === "research") loadResearch();
-    if (b.dataset.page === "next") loadNext();
-  })
-);
+function go(page) {
+  $$(".nav-item").forEach((x) => x.classList.toggle("active", x.dataset.page === page));
+  $$(".page").forEach((p) => p.classList.toggle("active", p.id === `page-${page}`));
+  if (page === "profiles") loadProfiles();
+  if (page === "settings") loadSettings();
+  if (page === "next") loadNext();
+}
+$$(".nav-item").forEach((b) => b.addEventListener("click", () => go(b.dataset.page)));
 
 function bindSeg(el, onChange) {
   el.addEventListener("click", (e) => {
@@ -231,7 +250,7 @@ function sortBy(list, { key, dir }) {
 function fillProfileSelects() {
   const opts = `<option value="">Todos os perfis</option>` +
     state.profiles.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
-  for (const id of ["#v-profile", "#c-profile", "#t-profile"]) {
+  for (const id of ["#v-profile"]) {
     const sel = $(id);
     sel.innerHTML = opts;
     sel.value = state.profile ? String(state.profile) : "";
@@ -271,7 +290,6 @@ async function useProfile(id) {
   state.profile = id;
   try { localStorage.setItem("profile", String(id)); } catch {}
   $("#pick-modal").hidden = true;
-  R.current = null;
   $("#v-run").value = "";
   await refreshAll();
   toast(`Usando o perfil ${currentProfile()?.name || ""}.`, "ok");
@@ -282,7 +300,7 @@ $("#pick-list").addEventListener("click", (e) => { const b = e.target.closest("[
 $("[data-pick-close]").addEventListener("click", closeProfilePicker);
 $("#pick-add").addEventListener("click", () => {
   $("#pick-modal").hidden = true;
-  $('.nav-item[data-page="profiles"]').click();
+  go("profiles");
   openModal();
 });
 
@@ -299,42 +317,44 @@ async function loadVideos() {
 }
 
 function filteredVideos() {
-  const kind = segValue($("#v-ai"));
-  const maxAge = +$("#v-age").value, maxSubs = +$("#v-subs").value;
-  const maxCh = +$("#v-chage").value, minMult = +$("#v-mult").value;
+  const onlyParams = segValue($("#v-mode")) === "params";
   const q = $("#v-search").value.trim().toLowerCase();
   return state.videos.filter((v) => {
-    if (kind === "ai" && !v.channel_ai) return false;
-    if (kind === "dark" && !v.is_dark) return false;
-    if (maxAge && (v.age_days == null || v.age_days > maxAge)) return false;
-    if (maxSubs && (v.subs == null || v.subs > maxSubs)) return false;
-    if (maxCh && (v.channel_age_days == null || v.channel_age_days > maxCh)) return false;
-    if (minMult && (v.multiplier == null || v.multiplier < minMult)) return false;
+    if (onlyParams && !passesViral(v)) return false;
     if (q && !`${v.title} ${v.channel_title}`.toLowerCase().includes(q)) return false;
     return true;
   });
 }
+const vSortNow = () => state.vSort.key ? state.vSort : { key: viralSortKey(), dir: -1 };
 
 function renderVideos() {
-  const list = sortBy(filteredVideos(), state.vSort);
+  const vs = vSortNow();
+  const list = sortBy(filteredVideos(), vs);
   const shown = list.slice(0, state.vLimit);
+  $$("#v-table th[data-sort]").forEach((th) => {
+    const on = th.dataset.sort === vs.key;
+    th.classList.toggle("sorted", on); th.classList.toggle("asc", on && vs.dir > 0); th.classList.toggle("desc", on && vs.dir < 0);
+  });
   const body = $("#v-table tbody");
 
   body.innerHTML = shown.map((v) => {
     const tags = [];
     tags.push(...channelTags(v));
     if (v.sources && v.sources.includes("history")) tags.push(`<span class="tag via" title="O perfil assistiu esse vídeo (veio do histórico)">Assistido</span>`);
-    if (v.sources && v.sources.includes("research")) tags.push(`<span class="tag via" title="Veio de uma pesquisa que você enviou para cá">Pesquisa</span>`);
+    if (v.sources && v.sources.includes("research")) tags.push(`<span class="tag via" title="Veio de uma pesquisa">Pesquisa</span>`);
+    if (v.sources && v.sources.includes("garimpo")) tags.push(`<span class="tag via" title="Achado no garimpo: o darkbot assistiu no perfil e entrou nos sugeridos e nos canais do nicho">Garimpo</span>`);
     tags.push(...newTags(v));
     return `<tr class="clickable" data-id="${v.video_id}">
       <td><div class="thumb"><img loading="lazy" src="https://i.ytimg.com/vi/${v.video_id}/mqdefault.jpg" alt="">
         ${v.duration_s != null ? `<span class="dur">${fmtDur(v.duration_s)}</span>` : ""}</div></td>
       <td>${titleCell(v)}
         <div class="v-meta"><span class="ch">${esc(v.channel_title || "")}</span>${langTag(v)}${tags.join("")}</div></td>
+      <td class="num" title="Faz ${fmt(v.views_hour)} views por hora desde que foi postado"><b class="vph">${fmt(v.views_hour)}</b></td>
       <td class="num"><span class="mult ${multClass(v.multiplier)}" title="${viralTip(v.multiplier)}">${fmtMult(v.multiplier)}</span></td>
       <td class="num" title="${fmt(v.views)} views no total">${fmt(v.views)}</td>
-      <td class="num" title="Faz ${fmt(v.views_day)} views por dia, em média">${fmt(v.views_day)}</td>
-      <td class="num ${v.growth_day > 0 ? "up" : "dim"}" title="${v.growth_day != null ? `Ganhou ${fmt(v.growth_day)} views por dia entre as duas últimas coletas` : "Precisa de pelo menos duas coletas para saber"}">${v.growth_day != null ? `+${fmt(v.growth_day)}` : "—"}</td>
+      <td class="num ${v.growth_hour == null ? "dim" : v.growth_hour > (v.views_hour || 0) ? "up" : ""}" title="${v.growth_hour != null
+        ? `${fmt(v.growth_hour)} views por hora entre as duas últimas coletas (a média desde a postagem é ${fmt(v.views_hour)}/h): ${v.growth_hour > (v.views_hour || 0) ? "está ACELERANDO" : "está desacelerando"}`
+        : "Precisa de pelo menos duas coletas com 1 hora ou mais de diferença"}">${v.growth_hour != null ? `${fmt(v.growth_hour)}/h${v.growth_hour > (v.views_hour || 0) ? " ↑" : ""}` : "—"}</td>
       <td class="num" title="O canal tem ${fmt(v.subs)} inscritos">${fmt(v.subs)}</td>
       <td class="num" title="Postado há ${ageLong(v.age_days)}">${fmtAge(v.age_days)}</td>
       <td class="num" title="Apareceu ${v.times_seen} ${v.times_seen === 1 ? "vez" : "vezes"} nos seus perfis">${v.times_seen}×</td>
@@ -347,7 +367,9 @@ function renderVideos() {
     empty.innerHTML = `<b>Nenhuma coleta ainda</b>Vá em <span class="link" data-goto="profiles">Perfis</span>, adicione um perfil treinado e clique em Coletar.`;
     empty.hidden = false;
   } else if (!list.length) {
-    empty.innerHTML = `<b>Nenhum vídeo com esses filtros</b>Tire algum filtro para ver mais vídeos.`;
+    empty.innerHTML = segValue($("#v-mode")) === "params"
+      ? `<b>Nenhum vídeo bate os seus parâmetros agora</b>Pesquise um assunto (ou cole um vídeo) na barra acima, veja <span class="link" data-vmode="all">Tudo</span> ou afrouxe os parâmetros em <span class="link" data-goto="settings">Configurações</span>.`
+      : `<b>Nenhum vídeo com esses filtros</b>Apague a busca para ver mais vídeos.`;
     empty.hidden = false;
   } else empty.hidden = true;
 
@@ -378,8 +400,8 @@ $("#v-table tbody").addEventListener("click", (e) => {
 $("#v-source").addEventListener("change", loadVideos);
 $("#v-run").addEventListener("change", loadVideos);
 $("#v-more").addEventListener("click", () => { state.vLimit += 150; renderVideos(); });
-bindSeg($("#v-ai"), renderVideos);
-["#v-age", "#v-subs", "#v-chage", "#v-mult"].forEach((s) => $(s).addEventListener("change", renderVideos));
+bindSeg($("#v-mode"), renderVideos);
+document.addEventListener("click", (e) => { if (e.target.closest("[data-vmode]")) $('#v-mode [data-v="all"]').click(); });
 $("#v-search").addEventListener("input", renderVideos);
 $("#v-profile").addEventListener("change", loadVideos);
 bindSort($("#v-table"), state.vSort, renderVideos);
@@ -388,143 +410,8 @@ $("#btn-refresh").addEventListener("click", async () => {
 });
 document.addEventListener("click", (e) => {
   const g = e.target.closest("[data-goto]");
-  if (g) $(`.nav-item[data-page="${g.dataset.goto}"]`).click();
+  if (g) go(g.dataset.goto);
 });
-
-// ---------------------------------------------------------------- canais
-
-async function loadChannels() {
-  const pid = $("#c-profile").value;
-  state.channels = await api(`/api/channels${pid ? `?profile_id=${pid}` : ""}`);
-  renderChannels();
-}
-
-function renderChannels() {
-  const maxAge = +$("#c-age").value, maxSubs = +$("#c-subs").value;
-  const q = $("#c-search").value.trim().toLowerCase();
-  const list = sortBy(state.channels.filter((c) => {
-    if (maxAge && (c.channel_age_days == null || c.channel_age_days > maxAge)) return false;
-    if (maxSubs && (c.subs == null || c.subs > maxSubs)) return false;
-    if (q && !`${c.title} ${c.handle}`.toLowerCase().includes(q)) return false;
-    return true;
-  }), state.cSort);
-
-  $("#c-table tbody").innerHTML = list.slice(0, 300).map((c) => `
-    <tr>
-      <td><div class="ch-cell">${c.thumb ? `<img class="avatar" loading="lazy" src="${esc(c.thumb)}" alt="">` : `<div class="avatar ini">${esc((c.title || "?").trim()[0] || "?").toUpperCase()}</div>`}
-        <div><div class="link" data-ch="${esc(c.handle || "channel/" + c.channel_id)}">${esc(c.title)}</div>
-        <div class="v-meta">${c.handle ? esc(c.handle) : ""}${channelTags({ channel_ai: c.ai, is_dark: c.dark, channel_format: c.format }).join("")}${c.channel_age_days != null && c.channel_age_days <= 180 ? `<span class="tag new" title="Canal criado há ${ageLong(c.channel_age_days)}">Canal novo</span>` : ""}</div></div></div></td>
-      <td class="num"><span class="mult ${multClass(c.best_multiplier)}" title="${viralTip(c.best_multiplier)}">${fmtMult(c.best_multiplier)}</span></td>
-      <td class="num">${fmt(c.avg_views_day)}</td>
-      <td class="num">${fmt(c.subs)}</td>
-      <td class="num">${fmt(c.channel_videos)}</td>
-      <td class="num" title="Canal criado há ${ageLong(c.channel_age_days)}">${fmtAge(c.channel_age_days)}</td>
-      <td class="num" title="Vídeos desse canal apareceram ${c.times_seen} vezes nos seus perfis">${c.times_seen}×</td>
-      <td>${c.top_video ? `<span class="link v-title" data-vid="${c.top_video.video_id}" title="${esc(c.top_video.title)}">${esc(c.top_video.title)}</span>` : "—"}</td>
-    </tr>`).join("");
-
-  const empty = $("#c-empty");
-  empty.hidden = list.length > 0;
-  empty.innerHTML = state.channels.length ? "<b>Nenhum canal com esses filtros</b>" : "<b>Nenhum canal ainda</b>Faça uma coleta em Perfis.";
-}
-
-$("#c-table tbody").addEventListener("click", (e) => {
-  const ch = e.target.closest("[data-ch]");
-  if (ch) return openYT(ch.dataset.ch.startsWith("@") ? ch.dataset.ch : ch.dataset.ch);
-  const v = e.target.closest("[data-vid]");
-  if (v) openYT(`watch?v=${v.dataset.vid}`);
-});
-["#c-age", "#c-subs"].forEach((s) => $(s).addEventListener("change", renderChannels));
-$("#c-search").addEventListener("input", renderChannels);
-$("#c-profile").addEventListener("change", loadChannels);
-bindSort($("#c-table"), state.cSort, renderChannels);
-
-// ---------------------------------------------------------------- títulos
-
-async function loadTitles() {
-  const q = new URLSearchParams({
-    max_age: $("#t-age").value, outlier: segValue($("#t-outlier")),
-  });
-  if ($("#t-profile").value) q.set("profile_id", $("#t-profile").value);
-  const d = await api(`/api/titles?${q}`);
-  const body = $("#t-body");
-  if (!d.ok) {
-    body.innerHTML = `<div class="box"><div class="empty"><b>Sem dados suficientes</b>${esc(d.reason)}</div></div>`;
-    return;
-  }
-  const pct = (x) => `${Math.round(x)}%`;
-  const L = d.length;
-  const featMax = Math.max(1, ...d.features.map((f) => Math.max(f.pct_top, f.pct_rest)));
-  const terms = (list, fmtTerm, badge, tip) => list.length
-    ? list.map((w, i) => `<span class="term ${i < 5 && badge === "pct" ? "hot" : ""}" title="${esc(tip(w))}">${esc(fmtTerm(w.term))}<span>${badge === "pct" ? pct(w.pct_top) : `${w.count}×`}</span></span>`).join("")
-    : `<span class="dim">Nada relevante ainda.</span>`;
-  const tipPct = (w) => `Aparece em ${w.pct_top}% dos títulos que mais viralizaram e em ${w.pct_rest}% dos outros`;
-  const nTerm = (t) => t.replace(/#/g, "N");
-
-  body.innerHTML = `
-    <div class="kpis">
-      <div class="kpi hot" title="Quantos vídeos entraram como 'os que mais viralizaram' para comparar com o resto"><div class="k-label">Vídeos que mais viralizaram</div><div class="k-value">${d.n_top}</div>
-        <div class="k-sub">de ${d.total} vídeos · a partir de ${fmtMult(d.cut)}</div></div>
-      <div class="kpi" title="${TIP.viralizou}"><div class="k-label">Quanto viralizaram, normalmente</div><div class="k-value">${fmtMult(d.median_mult_top)}</div>
-        <div class="k-sub">os outros: ${fmtMult(d.median_mult_rest)}</div></div>
-      <div class="kpi" title="Tamanho do título (letras e espaços) dos que mais viralizaram"><div class="k-label">Tamanho do título</div><div class="k-value">${Math.round(L.chars_top)} letras</div>
-        <div class="k-sub">os outros: ${Math.round(L.chars_rest)} letras</div></div>
-      <div class="kpi" title="Quantas palavras têm os títulos que mais viralizaram"><div class="k-label">Palavras no título</div><div class="k-value">${Math.round(L.words_top)}</div>
-        <div class="k-sub">os outros: ${Math.round(L.words_rest)}</div></div>
-    </div>
-
-    <div class="grid2">
-      <div class="box">
-        <div class="box-head"><h3>Jeitos de escrever o título</h3>
-          <div class="legend"><span><i class="a"></i>os que viralizaram</span><span><i class="b"></i>os outros</span></div></div>
-        ${d.features.map((f) => {
-          const diff = f.pct_top - f.pct_rest;
-          return `<div class="frow">
-            <div class="fl" title="Com isso no título, os vídeos viralizam ${fmtMult(f.mult_with)} (normalmente). Sem, viralizam ${fmtMult(f.mult_without)}.">${esc(f.label)}<small>com: viraliza ${fmtMult(f.mult_with)} · sem: ${fmtMult(f.mult_without)}</small></div>
-            <div class="dbar">
-              <div class="a"><b style="width:${(f.pct_top / featMax) * 100}%"></b>${pct(f.pct_top)}</div>
-              <div class="b"><b style="width:${(f.pct_rest / featMax) * 100}%"></b>${pct(f.pct_rest)}</div>
-            </div>
-            <div class="delta ${diff > 0 ? "pos" : "neg"}" title="${diff > 0 ? "Os que viralizaram usam mais isso" : "Os que viralizaram usam menos isso"}">${diff > 0 ? "+" : ""}${Math.round(diff)}%</div>
-          </div>`;
-        }).join("")}
-      </div>
-
-      <div class="stack">
-        <div class="box">
-          <div class="box-head"><h3>Palavras que mais aparecem nos que viralizaram</h3><div class="legend">% dos títulos que usam</div></div>
-          <div class="terms">${terms(d.words, (t) => t, "pct", tipPct)}</div>
-        </div>
-        <div class="box">
-          <div class="box-head"><h3>Duplas de palavras que se repetem</h3></div>
-          <div class="terms">${terms(d.bigrams, nTerm, "pct", tipPct)}</div>
-        </div>
-        <div class="box">
-          <div class="box-head"><h3>Como os títulos começam</h3><div class="legend">as 2 primeiras palavras</div></div>
-          <div class="terms">${terms(d.openings, (t) => `${nTerm(t)}…`, "count", (o) => `Títulos que começam assim viralizam ${fmtMult(o.mult)}, normalmente`)}</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="box">
-      <div class="box-head"><h3>Títulos que mais viralizaram</h3><div class="legend">clique para ver o vídeo</div></div>
-      <div class="olist">${d.examples.map((v) => `
-        <div class="orow" data-id="${v.video_id}">
-          <img loading="lazy" src="https://i.ytimg.com/vi/${v.video_id}/mqdefault.jpg" alt="">
-          <span class="otitle" title="${esc(v.title)}">${esc(v.title)}</span>
-          <span class="ometa">${esc(v.channel_title || "")} · ${fmt(v.views)} views</span>
-          <span class="mult ${multClass(v.multiplier)}" title="${viralTip(v.multiplier)}">${fmtMult(v.multiplier)}</span>
-        </div>`).join("")}</div>
-    </div>`;
-}
-
-$("#t-body").addEventListener("click", (e) => {
-  const r = e.target.closest(".orow");
-  if (r) openPreview(r.dataset.id);
-});
-bindSeg($("#t-outlier"), loadTitles);
-$("#t-age").addEventListener("change", loadTitles);
-$("#t-profile").addEventListener("change", loadTitles);
 
 // ---------------------------------------------------------------- perfis
 
@@ -532,70 +419,65 @@ const ICON_PROFILE = `<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><pa
 const ICON_JOKER = `<svg viewBox="0 0 24 24"><path d="M12 3l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.4 6.8 19.1l1-5.8L3.5 9.2l5.9-.9z"/></svg>`;
 
 async function loadProfiles() {
-  state.profiles = await api("/api/profiles");
+  const [profiles, runs] = await Promise.all([api("/api/profiles"), api("/api/runs?limit=200")]);
+  state.profiles = profiles;
   fillProfileSelects();
+  // Última atividade de cada perfil (coleta, histórico ou garimpo; as pesquisas ficam de fora).
+  const last = {}, count = {};
+  for (const r of runs) {
+    if (!r.profile_id || r.research_id) continue;
+    if (!last[r.profile_id]) last[r.profile_id] = r;
+    count[r.profile_id] = (count[r.profile_id] || 0) + 1;
+  }
   const wrap = $("#profiles");
   if (!state.profiles.length) {
     wrap.innerHTML = `<div class="card" style="grid-column:1/-1"><div class="empty"><b>Nenhum perfil ainda</b>
       Adicione um perfil do Chrome já treinado no nicho, ou um perfil "coringa" que consome vários nichos dark.</div></div>`;
-  } else {
-    wrap.innerHTML = state.profiles.map((p) => `
-      <div class="card" data-pid="${p.id}">
+    return;
+  }
+  const what = { home: "Coleta da home", history: "Coleta do que assistiu", garimpo: "Garimpo" };
+  wrap.innerHTML = state.profiles.map((p) => {
+    const r = last[p.id], using = p.id === state.profile;
+    const lastLine = !r ? `<span class="dim">Nenhuma coleta nem garimpo ainda.</span>`
+      : r.status === "running" ? `<span class="up">${what[r.source] || "Coleta"} rodando agora…</span>`
+      : r.status === "error" ? `<span class="err-text" title="${esc(r.error || "")}">${what[r.source] || "Coleta"} deu erro em ${fmtDate(r.started_at)}: ${esc((r.error || "").slice(0, 90))}</span>`
+      : `${what[r.source] || "Coleta"} em ${fmtDate(r.started_at)} · ${r.videos_found || 0} vídeos${!r.logged_in && r.source === "home" ? " · sem login" : ""}`;
+    return `
+      <div class="card ${using ? "using" : ""}" data-pid="${p.id}">
         <div class="card-top">
           <div class="card-icon ${p.kind}">${p.kind === "coringa" ? ICON_JOKER : ICON_PROFILE}</div>
           <div style="flex:1;min-width:0">
-            <div class="card-title">${esc(p.name)}</div>
-            <div class="card-sub">${p.kind === "coringa" ? "Coringa" : "Nicho"}${p.niche ? ` · ${esc(p.niche)}` : " · sem nicho"}<button class="icon-btn edit-pen" data-act="edit-niche" title="Corrigir nicho e tipo"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></button></div>
+            <div class="card-title">${esc(p.name)} ${using ? `<span class="tag good" title="É o perfil que o app está usando agora">Em uso</span>` : ""}</div>
+            <div class="card-sub"><span class="card-niche" title="${esc(p.niche || "")}">${p.kind === "coringa" ? "Coringa" : "Nicho"}${p.niche ? ` · ${esc(p.niche)}` : " · sem nicho"}</span><button class="icon-btn edit-pen" data-act="edit-niche" title="Corrigir nicho e tipo"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></button></div>
           </div>
           <button class="icon-btn" data-act="delete" title="Excluir perfil"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
         </div>
         <div class="card-stats">
-          <div><b>${p.runs}</b><span>coletas</span></div>
           <div><b>${fmt(p.videos)}</b><span>vídeos</span></div>
+          <div title="Coletas da home, do histórico e garimpos deste perfil"><b>${count[p.id] || 0}</b><span>coletas</span></div>
           <div><b>${p.last_run_at ? new Date(p.last_run_at).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" }) : "—"}</b><span>última</span></div>
         </div>
-        ${p.in_use ? `<div class="alert warn">Aberto no Chrome agora: feche a janela para coletar.</div>` : ""}
+        <div class="card-last" title="O que foi feito por último neste perfil">${lastLine}</div>
+        ${p.in_use ? `<div class="alert warn">Aberto no Chrome agora: feche a janela para coletar ou garimpar.</div>` : ""}
         <div class="card-actions">
-          <label class="scrolls" title="Quantas vezes rolar a página inicial do YouTube. Mais = mais vídeos (e mais demora)">Rolar <input class="input" type="number" min="1" max="80" value="15" data-scrolls></label>
-          <label class="check" title="Mostra a janela do Chrome enquanto coleta (para acompanhar)"><input type="checkbox" data-show> mostrar o Chrome</label>
-          <span class="spacer"></span>
+          ${using ? "" : `<button class="btn sm" data-act="use" title="Passa a usar este perfil no app inteiro">Usar este</button>`}
+          <button class="btn primary sm" data-act="collect" title="Abre o perfil, rola a página inicial e anota os vídeos que o YouTube mostrar">Coletar a home</button>
+          <button class="btn sm" data-act="garimpo" title="Assiste vídeos do nicho, entra nos sugeridos e nos canais, aquece o perfil e traz o que achar">Garimpar</button>
         </div>
-        <div class="card-actions">
-          <button class="btn primary sm" data-act="collect" title="Entra no perfil, rola a página inicial e anota os vídeos que o YouTube mostrar">Coletar agora</button>
-          <button class="btn sm" data-act="open" title="Abre o Chrome nesse perfil para você entrar na conta do YouTube">Entrar na conta</button>
-        </div>
-        <div class="card-actions">
-          <button class="btn sm" data-act="history" title="Anota os vídeos que esse perfil assistiu (o histórico do YouTube)">Coletar o que assistiu</button>
-          <button class="btn ghost sm" data-act="train" title="Abre o Chrome do perfil já pesquisando o nicho. Assista alguns vídeos para o YouTube aprender o que mostrar">Treinar o perfil</button>
-        </div>
-      </div>`).join("");
-  }
-  loadRuns();
+        <details class="card-more"><summary>Mais opções</summary>
+          <div class="card-actions">
+            <label class="scrolls" title="Quantas vezes rolar a página inicial do YouTube. Mais = mais vídeos (e mais demora)">Rolar <input class="input" type="number" min="1" max="80" value="15" data-scrolls></label>
+            <label class="check" title="Mostra a janela do Chrome enquanto coleta (para acompanhar)"><input type="checkbox" data-show> mostrar o Chrome</label>
+          </div>
+          <div class="card-actions">
+            <button class="btn ghost sm" data-act="open" title="Abre o Chrome nesse perfil para você entrar na conta do YouTube">Entrar na conta</button>
+            <button class="btn ghost sm" data-act="train" title="Abre o Chrome do perfil já pesquisando o nicho, para você assistir à mão">Abrir o Chrome no nicho</button>
+            <button class="btn ghost sm" data-act="history" title="Anota os vídeos que esse perfil assistiu (o histórico do YouTube; precisa estar logado)">Coletar o que assistiu</button>
+          </div>
+        </details>
+      </div>`;
+  }).join("");
 }
-
-async function loadRuns() {
-  const runs = await api("/api/runs");
-  const label = { done: "Concluída", error: "Erro", running: "Rodando" };
-  $("#runs-table tbody").innerHTML = runs.length ? runs.map((r) => `
-    <tr><td>${esc(r.profile_name || "—")}</td><td>${fmtDate(r.started_at)}</td>
-    <td><span class="status ${r.status}">${label[r.status] || r.status}</span>${r.status === "done" && !r.logged_in ? ` <span class="tag fresh">sem login</span>` : ""}</td>
-    <td class="num">${r.videos_found || 0}</td><td class="dim small">${esc(r.error || "")}</td>
-    <td class="col-act">${r.status === "running" ? "" : `<button class="icon-btn row-del" data-run="${r.id}" title="Excluir esta coleta e os vídeos que só apareceram nela">
-      <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12"/></svg></button>`}</td></tr>`).join("")
-    : `<tr><td colspan="6" class="dim">Nenhuma coleta ainda.</td></tr>`;
-}
-
-$("#runs-table").addEventListener("click", async (e) => {
-  const b = e.target.closest("[data-run]");
-  if (!b) return;
-  if (!confirm("Excluir esta coleta?\n\nOs vídeos que só apareceram nela somem, junto com os números, comentários e canais que só ela trouxe. O que também apareceu em outra coleta ou pesquisa continua.")) return;
-  try {
-    const r = await api(`/api/runs/${b.dataset.run}`, { method: "DELETE" });
-    toast(`Coleta excluída · ${r.videos} vídeos e ${r.channels} canais removidos.`, "ok");
-    refreshAll();
-    loadProfiles();
-  } catch (err) { toast(err.message, "err"); }
-});
 
 $("#profiles").addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-act]");
@@ -603,7 +485,11 @@ $("#profiles").addEventListener("click", async (e) => {
   const card = btn.closest("[data-pid]"), pid = card.dataset.pid;
   const p = state.profiles.find((x) => x.id == pid);
   try {
-    if (btn.dataset.act === "collect") {
+    if (btn.dataset.act === "use") {
+      return useProfile(p.id).then(loadProfiles);
+    } else if (btn.dataset.act === "garimpo") {
+      return openGarimpo(p.id);
+    } else if (btn.dataset.act === "collect") {
       const scrolls = +$("[data-scrolls]", card).value || 15;
       const show_browser = $("[data-show]", card).checked;
       watchJob(await api(`/api/profiles/${pid}/collect`, { method: "POST", body: { scrolls, show_browser } }));
@@ -756,73 +642,11 @@ $("#m-save").addEventListener("click", async () => {
   } catch (e) { toast(e.message, "err"); }
 });
 
-// ---------------------------------------------------------------- pesquisa de mercado
+// ---------------------------------------------------------------- pesquisa (sob demanda) e relatório do nicho
 
-const R = { list: [], current: null, data: null, filter: "dark", rel: 2, pot: 1, age: 0, sort: { key: "score", dir: -1 } };
-const VIA_LABELS = {
-  semente: "Seu vídeo", sugerido: "Sugerido", "busca:recente": "Busca: da semana",
-  "busca:top-mes": "Busca: mais vistos do mês", "busca:top-ano": "Busca: mais vistos do ano",
-  "busca:top-semana": "Busca: mais vistos da semana", "busca:relevante": "Busca",
-  "busca:variacao": "Busca: título parecido", "canal:recente": "Vídeo novo de concorrente", historico: "Perfil assistiu",
-};
-const VIA_TIP = {
-  semente: "O vídeo de onde a pesquisa partiu", sugerido: "Apareceu nos vídeos sugeridos do YouTube",
-  "busca:variacao": "Achado buscando versões parecidas do título", "canal:recente": "Vídeo recente de um canal concorrente",
-  historico: "Vídeo que o perfil assistiu",
-};
-const REL_TAG = { 3: `<span class="tag good" title="Mesmo assunto e mesmo jeito de vídeo: é um concorrente direto, dá para copiar">Mesmo formato</span>`,
-  2: `<span class="tag neutral" title="Mesmo assunto, mas o vídeo é feito de outro jeito">Mesmo assunto</span>`,
-  1: `<span class="tag via" title="Assunto parecido, mas não é o mesmo">Parecido</span>` };
-
-async function loadResearch() {
-  R.list = await api(`/api/research${state.profile ? `?profile_id=${state.profile}` : ""}`);
-  if (R.current == null && R.list.length) R.current = R.list[0].id;
-  renderResearchList();
-  if (R.current != null) await openResearch(R.current, true);
-  else renderResearchEmpty();
-}
-
-function renderResearchEmpty() {
-  $("#r-detail").innerHTML = `<div class="box"><div class="empty"><b>Nenhuma pesquisa ainda</b>
-    Comece por um vídeo de referência (o darkbot navega pelos sugeridos) ou por palavras-chave do nicho.
-    <div class="empty-actions"><button class="btn primary sm" data-rnew="video">Partir de um vídeo</button>
-    <button class="btn sm" data-rnew="keyword">Palavras-chave</button></div></div></div>`;
-}
-
-function renderResearchList() {
-  $("#r-list").innerHTML = R.list.length ? R.list.map((r) => `
-    <div class="r-item ${r.id === R.current ? "on" : ""}" data-rid="${r.id}">
-      ${r.kind === "video" ? `<img src="https://i.ytimg.com/vi/${esc(r.seed)}/mqdefault.jpg" alt="">`
-        : `<div class="r-kw-icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></div>`}
-      <div class="r-item-body">
-        <div class="r-item-title">${esc(r.label)}</div>
-        ${r.profile_id == null && state.profile ? `<div class="r-item-legacy" title="Pesquisa antiga, de antes de separar por perfil">sem perfil · <span class="link" data-move="${r.id}">trazer para este perfil</span></div>` : ""}
-        <div class="r-item-meta">${fmtDate(r.created_at)} · ${r.status === "running" ? `<span class="up">rodando…</span>`
-          : r.status === "error" ? `<span class="err-text">erro</span>`
-          : r.status === "cancelled" ? `cancelada · ${r.videos_found} vídeos` : `${r.videos_found} vídeos`}${r.has_report ? ` · <span class="tag ai">relatório</span>` : ""}</div>
-      </div>
-    </div>`).join("") : `<div class="muted small r-list-empty">As pesquisas ficam guardadas aqui.</div>`;
-}
-
-$("#r-list").addEventListener("click", async (e) => {
-  const mv = e.target.closest("[data-move]");
-  if (mv) {
-    e.stopPropagation();
-    await api(`/api/research/${mv.dataset.move}/profile`, { method: "POST", body: { profile_id: state.profile } });
-    toast("Pesquisa trazida para este perfil.", "ok");
-    return loadResearch();
-  }
-  const it = e.target.closest("[data-rid]");
-  if (it) openResearch(+it.dataset.rid);
-});
-
-async function openResearch(id, quiet = false) {
-  R.current = id;
-  renderResearchList();
-  if (!quiet) $("#r-detail").innerHTML = `<div class="box"><div class="empty">Carregando…</div></div>`;
-  try { R.data = await api(`/api/research/${id}`); } catch (e) { return toast(e.message, "err"); }
-  renderResearch();
-}
+// A pesquisa busca em vários idiomas e entra nos sugeridos; o que acha cai em Viralizando agora. Sem relatório
+// automático (economia): o relatório é pedido na prévia do vídeo ou em Coletas e abre no painel da direita.
+const R = { data: null };   // pesquisa do relatório aberto (para os títulos dos vídeos citados)
 
 // "[videoId]" no texto da IA vira link para o vídeo.
 function linkIds(text) {
@@ -832,55 +656,6 @@ function videoTitle(id, max = 60) {
   const v = R.data?.videos.find((x) => x.video_id === id);
   const t = v?.title || id;
   return esc(t.length > max ? t.slice(0, max - 1) + "…" : t);
-}
-
-function renderResearch() {
-  const { research: r, videos, report, report_meta: meta } = R.data;
-  const dark = videos.filter((v) => v.is_dark).length;
-  const recent = videos.filter((v) => v.age_days != null && v.age_days <= 30).length;
-  const head = `
-    <div class="box r-head">
-      <div class="r-head-top">
-        ${r.kind === "video" ? `<img class="r-seed" data-vref="${esc(r.seed)}" src="https://i.ytimg.com/vi/${esc(r.seed)}/mqdefault.jpg" alt="">` : ""}
-        <div class="grow">
-          <div class="r-kicker">${r.kind === "video" ? "Partiu do vídeo" : "Palavras-chave"} · ${fmtDate(r.created_at)}</div>
-          <h2>${esc(r.label)}</h2>
-          ${r.topic ? `<div class="r-topic" title="O que a IA entendeu do seu vídeo"><div><span>Assunto</span>${esc(r.topic.theme)}</div><div><span>Tipo</span>${esc(r.topic.format)}</div>
-            <div><span>Gancho</span>${esc(r.topic.angle)}</div></div>` : ""}
-          ${(() => {
-            const variants = r.topic?.variants || [];
-            const queries = r.keywords.filter((k) => !variants.includes(k));
-            const chip = (k) => `<span class="term sm" data-kw="${esc(k)}" title="Pesquisar só esta busca">${esc(k)}</span>`;
-            return (queries.length ? `<div class="terms r-kws">${queries.map(chip).join("")}</div>` : "") +
-              (variants.length ? `<details class="r-variants"><summary title="A IA trocou detalhes do título para achar vídeos parecidos">Títulos parecidos que a IA pesquisou (${variants.length})</summary>
-                <div class="terms r-kws">${variants.map(chip).join("")}</div></details>` : "");
-          })()}
-        </div>
-        <div class="r-head-actions">
-          ${r.status === "done" || r.status === "cancelled" ? (r.run_id
-            ? `<button class="btn ghost sm" id="r-to-disc" data-run="${r.run_id}" title="Já é uma coleta: ver em Descobertas">Ver em Descobertas</button>`
-            : `<button class="btn sm" id="r-to-disc" title="Vira uma coleta (marcada como pesquisa) e os vídeos relevantes aparecem em Descobertas">Enviar para Descobertas</button>`) : ""}
-          ${r.status === "done" || r.status === "cancelled" ? `<button class="btn ${report ? "" : "primary"} sm" id="r-report-btn">${report ? "Refazer relatório" : "Gerar relatório com IA"}</button>` : ""}
-          <button class="icon-btn" id="r-del" title="Excluir pesquisa"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
-        </div>
-      </div>
-      ${r.status === "error" ? `<div class="alert warn">${esc(r.error)}</div>` : ""}
-      ${r.status === "running" ? `<div class="alert info">Pesquisa rodando… acompanhe no canto da tela (dá para cancelar por lá).</div>` : ""}
-      ${r.status === "cancelled" ? `<div class="alert info">Pesquisa cancelada: aqui está o que já tinha sido feito. Dá para gerar o relatório com esses vídeos.</div>` : ""}
-      <div class="r-stats">
-        <div title="Quantos vídeos a pesquisa achou"><b>${videos.length}</b><span>vídeos achados</span></div>
-        <div title="Vídeos de canais dark (ninguém aparece)"><b>${dark}</b><span>de canais dark</span></div>
-        <div title="Vídeos postados nos últimos 30 dias"><b>${recent}</b><span>postados no último mês</span></div>
-        <div title="Vídeos que tiveram os comentários lidos pela IA"><b>${Object.keys(R.data.comments).length}</b><span>com comentários lidos</span></div>
-        ${meta ? `<div title="Quanto custou o relatório da IA"><b>${fmtUSD(meta.cost_usd)}</b><span>custo do relatório</span></div>` : ""}
-      </div>
-    </div>`;
-  const mal = r.kind === "video" ? `<div class="box mal-box"><div class="box-head"><h3>Método Malandro</h3>
-    <span class="dim small">em que língua ninguém fez este vídeo ainda</span></div>${renderMalandro(R.data.malandro, r.seed)}</div>` : "";
-  const vars = r.kind === "video" ? `<div class="box"><div class="box-head"><h3>Ideias de variações deste vídeo</h3>
-    <span class="dim small">com a chance de viralizar</span></div>${renderVariations(R.data.variations, r.seed)}</div>` : "";
-  $("#r-detail").innerHTML = head + vars + mal + renderSaturation() + (report ? renderReport(report) : "") + renderResearchVideos() + renderComments();
-  bindResearchTable();
 }
 
 function renderReport(rep) {
@@ -894,7 +669,7 @@ function renderReport(rep) {
       <p class="r-lead">${linkIds(rep.summary)}</p>
     </div>
 
-    <div class="box"><div class="box-head"><h3>Copie estes agora</h3><span class="dim small">vídeos recentes que viralizaram</span></div>
+    <div class="box"><div class="box-head"><h3>Modele estes agora</h3><span class="dim small">vídeos reais que estão viralizando</span></div>
       <div class="model-list">${rep.to_model.map((m, i) => {
         const v = R.data.videos.find((x) => x.video_id === m.video_id);
         return `<div class="model-row" data-vref="${esc(m.video_id)}">
@@ -903,41 +678,22 @@ function renderReport(rep) {
           <div class="grow"><div class="otitle">${videoTitle(m.video_id, 90)}</div>
             <div class="model-why">${linkIds(m.why)}</div>
             ${v ? `<div class="v-meta"><span class="ch">${esc(v.channel_title || "")}</span><span class="mult ${multClass(v.multiplier)}">${fmtMult(v.multiplier)}</span>
-              <span>${fmt(v.views)} views</span><span>${fmtAge(v.age_days)}</span></div>` : ""}</div>
-          ${seedBtn(m.video_id)}
+              <span title="Views por hora">${fmt(v.views_hour)}/h</span><span>${fmt(v.views)} views</span><span>${fmtAge(v.age_days)}</span></div>` : ""}</div>
+          ${modeledBtn(m.video_id)}
         </div>`; }).join("")}</div>
     </div>
 
-    <div class="grid2">
+    <div class="${rep.gaps?.length ? "grid2" : ""}">
       <div class="box"><div class="box-head"><h3>O que está funcionando</h3></div>
         <ul class="r-bullets">${rep.what_works.map((x) => `<li>${linkIds(x)}</li>`).join("")}</ul></div>
-      <div class="box"><div class="box-head"><h3>Modelos de título</h3><span class="dim small">troque o que está entre [ ]</span></div>
-        <div class="formulas">${rep.title_formulas.map((x) => `<div class="formula" data-copy="${esc(x)}" title="Copiar">${esc(x)}</div>`).join("")}</div></div>
+      ${rep.gaps?.length ? `<div class="box"><div class="box-head"><h3>Brechas</h3><span class="dim small" title="O que o público pede ou está crescendo e quase ninguém entregou ainda">espaço livre agora</span></div>
+        <ul class="r-bullets gaps">${rep.gaps.map((x) => `<li>${linkIds(x)}</li>`).join("")}</ul></div>` : ""}
     </div>
 
     <div class="box"><div class="box-head"><h3>O que o público está pedindo</h3><span class="dim small">tirado dos comentários</span></div>
       <div class="asks">${rep.audience_requests.map((a) => `
         <div class="ask"><div class="ask-top"><b>${esc(a.request)}</b><span class="tag ${strength[a.strength]}">sinal ${a.strength === "media" ? "médio" : a.strength}</span></div>
         <div class="ask-quote">“${linkIds(a.evidence.replace(/^["“”'\s]+|["“”'\s]+$/g, ""))}”</div></div>`).join("")}</div>
-    </div>
-
-    <div class="box"><div class="box-head"><h3>Ideias de vídeo prontas</h3><span class="dim small">clique em um texto para copiar</span></div>
-      <div class="ideas">${rep.ideas.map((d, i) => `
-        <div class="idea">
-          <div class="idea-n">Ideia ${i + 1}</div>
-          <div class="idea-title" data-copy="${esc(d.title)}">${esc(d.title)}</div>
-          <div class="idea-alts">${d.alt_titles.map((t) => `<span data-copy="${esc(t)}">${esc(t)}</span>`).join("")}</div>
-          <div class="idea-label">Gancho</div>
-          <div class="idea-hook" data-copy="${esc(d.hook)}">${esc(d.hook)}</div>
-          <div class="idea-label">Estrutura do roteiro</div>
-          <ol class="idea-structure">${d.structure.map((x) => `<li>${esc(x)}</li>`).join("")}</ol>
-          <div class="idea-label">Descrição</div>
-          <div class="idea-desc" data-copy="${esc(d.description)}">${esc(d.description)}</div>
-          <div class="idea-label">Tags</div>
-          <div class="terms" data-copy="${esc(d.tags.join(", "))}">${d.tags.map((t) => `<span class="term sm">${esc(t)}</span>`).join("")}</div>
-          <div class="idea-why"><b>Por que agora:</b> ${linkIds(d.why_now)}</div>
-          ${d.based_on.length ? `<div class="idea-refs">${d.based_on.map((id) => `<img data-vref="${esc(id)}" title="${videoTitle(id)}" src="https://i.ytimg.com/vi/${esc(id)}/mqdefault.jpg" alt="">`).join("")}</div>` : ""}
-        </div>`).join("")}</div>
     </div>
 
     <div class="grid2">
@@ -948,218 +704,82 @@ function renderReport(rep) {
     </div>`;
 }
 
-// Onde o formato do vídeo de referência já foi modelado (concorrentes diretos por idioma).
-function renderSaturation() {
-  const sat = R.data.saturation || [];
-  if (!sat.length) return "";
-  const name = Object.fromEntries((state.langs || []).map((l) => [l.code, l.name]));
-  const picked = (R.data.research.langs ? JSON.parse(R.data.research.langs) : []);
-  const gaps = picked.filter((l) => !sat.some((s) => s.lang === l && s.recent_channels >= 2));
-  const level = (s) => s.recent_channels >= 6 ? ["alta", "lvl sat-alta"] : s.recent_channels >= 2 ? ["média", "lvl media"] : ["baixa", "lvl sat-baixa"];
-  return `<div class="box"><div class="box-head"><h3>Em que idiomas já copiaram esse vídeo</h3><span class="dim small">quanto mais canais, mais concorrência</span></div>
-    <table class="table compact sat-table"><thead><tr><th>Idioma</th><th class="num">Vídeos</th><th class="num">Canais</th>
-      <th class="num" title="Canais que fizeram nos últimos 30 dias">Canais no último mês</th><th class="num" title="${TIP.viralizou}">Viralizam, normalmente</th><th title="Quanta gente já está fazendo">Concorrência</th><th title="O que mais viralizou nesse idioma">O que mais viralizou</th></tr></thead><tbody>
-    ${sat.map((s) => { const [lab, cls] = level(s); return `<tr><td><b>${esc(name[s.lang] || s.lang.toUpperCase())}</b></td>
-      <td class="num">${s.videos}</td><td class="num">${s.channels}</td><td class="num">${s.recent_channels}</td>
-      <td class="num">${s.median_mult != null ? fmtMult(s.median_mult) : "—"}</td><td><span class="${cls}">${lab}</span></td>
-      <td class="sat-best">${s.best ? `<span class="dim">${fmtMult(s.best.multiplier)}</span> <span class="vid-ref" data-vref="${s.best.video_id}" title="${esc(s.best.title)}">▶ ${esc(s.best.title)}</span>` : "—"}</td></tr>`; }).join("")}
-    </tbody></table>
-    ${gaps.length ? `<div class="sat-gap">Espaço livre: quase ninguém fez esse vídeo no último mês em <b>${gaps.map((l) => esc(name[l] || l)).join(", ")}</b>. Dá para fazer nesses idiomas.</div>` : ""}
-  </div>`;
-}
-
-function researchFiltered() {
-  return sortBy(R.data.videos.filter((v) => {
-    if (R.filter === "dark" && !v.is_dark) return false;
-    if (R.filter === "ai" && !v.channel_ai) return false;
-    if (v.relevance != null && v.relevance < R.rel && v.via !== "semente") return false;
-    if (R.pot && !v.potential && v.via !== "semente") return false;
-    if (R.age && (v.age_days == null || v.age_days > R.age)) return false;
-    return true;
-  }), R.sort);
-}
-
-function renderResearchVideos() {
-  const list = researchFiltered();
-  const segBtn = (v, label, cur) => `<button data-v="${v}" class="${cur == v ? "on" : ""}">${label}</button>`;
-  return `
-    <div class="box r-videos">
-      <div class="box-head"><h3>Vídeos encontrados</h3>
-        <button class="btn ghost sm" id="rv-translate" title="Traduz os títulos em outros idiomas (Haiku, uma vez por vídeo)">Traduzir títulos</button>
-        <div class="r-filters">
-          <div class="seg sm" id="rv-pot" title="Só os bons: vídeos que tiveram mais views que os inscritos do canal ou que fazem mais de 1.000 views por dia">${segBtn(1, "Só os bons", R.pot)}${segBtn(0, "Mostrar todos", R.pot)}</div>
-          <div class="seg sm" id="rv-rel" title="O quanto o vídeo tem a ver com o que você pesquisou (a IA decide)">${segBtn(3, "Mesmo formato", R.rel)}${segBtn(2, "Mesmo assunto", R.rel)}${segBtn(1, "Parecidos", R.rel)}</div>
-          <div class="seg sm" id="rv-type" title="Tipo de canal">${segBtn("all", "Qualquer canal", R.filter)}${segBtn("dark", "Só dark", R.filter)}${segBtn("ai", "Feito com IA", R.filter)}</div>
-          <div class="seg sm" id="rv-age">${segBtn(0, "Qualquer data", R.age)}${segBtn(30, "30 dias", R.age)}${segBtn(90, "90 dias", R.age)}</div>
-        </div></div>
-      <table class="table" id="rv-table">
-        <thead><tr>
-          <th class="col-thumb"></th><th data-sort="title">Vídeo</th>
-          <th data-sort="score" class="num" title="${TIP.nota}">Nota</th>
-          <th data-sort="multiplier" class="num" title="${TIP.viralizou}">Viralizou</th><th data-sort="views" class="num" title="Total de views">Views</th>
-          <th data-sort="views_day" class="num" title="Views por dia, em média">Views por dia</th><th data-sort="subs" class="num" title="Inscritos do canal">Inscritos</th>
-          <th data-sort="age_days" class="num" title="Há quanto tempo foi postado">Postado há</th><th class="col-act"></th>
-        </tr></thead>
-        <tbody>${list.slice(0, 200).map((v) => {
-          const tags = [...(REL_TAG[v.relevance] ? [REL_TAG[v.relevance]] : []),
-            `<span class="tag via" title="${VIA_TIP[v.via] || "Achado numa busca do YouTube"}">${VIA_LABELS[v.via] || v.via}</span>`, ...channelTags(v), ...newTags(v)];
-          return `<tr class="clickable" data-vref="${v.video_id}">
-            <td><div class="thumb"><img loading="lazy" src="https://i.ytimg.com/vi/${v.video_id}/mqdefault.jpg" alt="">
-              ${v.duration_s != null ? `<span class="dur">${fmtDur(v.duration_s)}</span>` : ""}</div></td>
-            <td>${titleCell(v)}
-              <div class="v-meta"><span class="ch">${esc(v.channel_title || "")}</span>${langTag(v)}${tags.join("")}</div></td>
-            <td class="num" title="${TIP.nota}"><b class="score">${v.score != null ? v.score.toFixed(1).replace(".", ",") : "—"}</b></td>
-            <td class="num"><span class="mult ${multClass(v.multiplier)}" title="${viralTip(v.multiplier)}">${fmtMult(v.multiplier)}</span></td>
-            <td class="num" title="${fmt(v.views)} views no total">${fmt(v.views)}</td><td class="num" title="Faz ${fmt(v.views_day)} views por dia">${fmt(v.views_day)}</td>
-            <td class="num" title="O canal tem ${fmt(v.subs)} inscritos">${fmt(v.subs)}</td><td class="num" title="Postado há ${ageLong(v.age_days)}">${fmtAge(v.age_days)}</td>
-            <td class="col-act">${rowActions(v)}</td></tr>`;
-        }).join("")}</tbody>
-      </table>
-      ${list.length ? "" : `<div class="empty"><b>Nada nesse filtro</b>Tente "Todos".</div>`}
-    </div>`;
-}
-
-function renderComments() {
-  const entries = Object.entries(R.data.comments);
-  if (!entries.length) return "";
-  return `<div class="box"><div class="box-head"><h3>Comentários que a IA leu</h3><span class="dim small">os mais curtidos dos melhores vídeos</span></div>
-    ${entries.map(([id, cms]) => `<details class="cm-video"><summary>${videoTitle(id, 90)} <span class="dim">· ${cms.length}</span></summary>
-      ${cms.map((c) => `<div class="cm"><span class="cm-likes">♥ ${fmt(c.likes)}</span>${esc(c.text)}</div>`).join("")}</details>`).join("")}
-  </div>`;
-}
-
-function bindResearchTable() {
-  const table = $("#rv-table");
-  if (!table) return;
-  $$("th[data-sort]", table).forEach((th) => {
-    th.classList.toggle("sorted", th.dataset.sort === R.sort.key);
-    th.classList.toggle("asc", th.dataset.sort === R.sort.key && R.sort.dir === 1);
-    th.addEventListener("click", () => {
-      R.sort = R.sort.key === th.dataset.sort ? { key: th.dataset.sort, dir: -R.sort.dir } : { key: th.dataset.sort, dir: -1 };
-      rerenderResearchVideos();
-    });
-  });
-  bindSeg($("#rv-type"), (v) => { R.filter = v; rerenderResearchVideos(); });
-  bindSeg($("#rv-age"), (v) => { R.age = +v; rerenderResearchVideos(); });
-  bindSeg($("#rv-rel"), (v) => { R.rel = +v; rerenderResearchVideos(); });
-  bindSeg($("#rv-pot"), (v) => { R.pot = +v; rerenderResearchVideos(); });
-}
-function rerenderResearchVideos() {
-  const box = $(".r-videos");
-  box.outerHTML = renderResearchVideos();
-  bindResearchTable();
-}
-
-$("#r-detail").addEventListener("click", async (e) => {
-  const copy = e.target.closest("[data-copy]");
-  if (copy) {
-    try { await navigator.clipboard.writeText(copy.dataset.copy); toast("Copiado.", "ok"); } catch { toast("Não consegui copiar.", "err"); }
-    return;
-  }
-  const kw = e.target.closest("[data-kw]");
-  if (kw) return startResearch({ kind: "keyword", seed: kw.dataset.kw, report: true });
-  const vref = e.target.closest("[data-vref]");
-  if (vref) return openPreview(vref.dataset.vref);
-  if (e.target.closest("#r-report-btn")) {
-    const has = !!R.data.report;
-    if (has && !confirm("Refazer o relatório gasta tokens de novo (cerca de US$ 0,05 a 0,10). Continuar?")) return;
-    try { watchJob(await api(`/api/research/${R.current}/report`, { method: "POST" })); } catch (err) { toast(err.message, "err"); }
-    return;
-  }
-  const td = e.target.closest("#r-to-disc");
-  if (td) {
-    try {
-      const res = td.dataset.run ? { run_id: +td.dataset.run } : await api(`/api/research/${R.current}/to-discoveries`, { method: "POST" });
-      if (!td.dataset.run) toast(`${res.videos} vídeos enviados para Descobertas como uma coleta.`, "ok");
-      await loadRunOptions();
-      $("#v-run").value = String(res.run_id);
-      $('.nav-item[data-page="videos"]').click();
-      await Promise.all([loadVideos(), loadOverview()]);
-    } catch (err) { toast(err.message, "err"); }
-    return;
-  }
-  if (e.target.closest("#r-del")) {
-    if (!confirm("Excluir esta pesquisa?\n\nO relatório e os vídeos que só apareceram nela somem. O que também está em outra pesquisa ou coleta continua.")) return;
-    try {
-      const d = await api(`/api/research/${R.current}`, { method: "DELETE" });
-      toast(`Pesquisa excluída · ${d.videos} vídeos removidos.`, "ok");
-    } catch (err) { return toast(err.message, "err"); }
-    R.current = null;
-    loadResearch();
-  }
-});
-
 async function startResearch(body) {
   body.langs = body.langs || selectedLangs();
   if (!body.profile_id) body.profile_id = state.profile;
-  if (body.max_age_days === undefined) body.max_age_days = selectedPeriod();
+  body.report = false;
   try {
     const res = await api("/api/research", { method: "POST", body });
-    watchJob(res.job);
-    R.current = res.id;
-    $('.nav-item[data-page="research"]').click();
-    toast(body.kind === "video" ? "Pesquisa iniciada a partir do vídeo." : `Pesquisando "${body.seed}"…`, "ok");
+    watchJob(res.job, () => researchDone(res.id));
+    toast(body.kind === "video" ? "Procurando vídeos parecidos… (uns 2 minutos, acompanhe no canto da tela)"
+      : `Pesquisando "${body.seed}"… (uns 2 minutos, acompanhe no canto da tela)`, "ok");
+    if (!$("#pv").hidden && PV.id && body.seed === PV.id) openPreview(PV.id, true);
   } catch (e) { toast(e.message, "err"); }
 }
 
-// Modal de nova pesquisa
-function openResearchModal(mode) {
-  $("#rmodal").hidden = false;
-  $$("#r-mode button").forEach((b) => b.classList.toggle("on", b.dataset.v === mode));
-  showResearchMode(mode);
-  $("#r-hist-profile").innerHTML = state.profiles.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
-  if (state.profile) $("#r-hist-profile").value = String(state.profile);
-  renderLangPicker($("#r-langs"));
-  const niches = [...new Set(state.profiles.map((p) => p.niche).filter(Boolean))];
-  $("#r-niches").innerHTML = niches.length ? `<span class="dim small">Nichos dos seus perfis:</span>` +
-    niches.map((n) => `<span class="term sm clickable" data-niche="${esc(n)}">${esc(n)}</span>`).join("") : "";
-  setTimeout(() => (mode === "video" ? $("#r-link") : $("#r-kws")).focus(), 50);
+// Fim da pesquisa: a lista mostra só o que ela achou (Coleta → Todas volta para tudo).
+async function researchDone(rid) {
+  try {
+    const d = await api(`/api/research/${rid}`);
+    if (!d.research.run_id) return;
+    await loadRunOptions();
+    $("#v-run").value = String(d.research.run_id);
+    go("videos");
+    await loadVideos();
+    toast(`Pesquisa pronta: a lista mostra só os ${d.videos.length} vídeos que ela achou (Coleta → Todas volta para tudo).`, "ok");
+    if (!$("#pv").hidden && PV.id && !PV.report) openPreview(PV.id, true);
+  } catch {}
 }
-const closeResearchModal = () => { $("#rmodal").hidden = true; };
-$("#r-new-video").addEventListener("click", () => openResearchModal("video"));
-$("#r-new-kw").addEventListener("click", () => openResearchModal("keyword"));
-$("#r-detail").addEventListener("click", (e) => { const b = e.target.closest("[data-rnew]"); if (b) openResearchModal(b.dataset.rnew); });
-$$("[data-rclose]").forEach((b) => b.addEventListener("click", closeResearchModal));
-$("#rmodal").addEventListener("click", (e) => { if (e.target.id === "rmodal") closeResearchModal(); });
-function showResearchMode(v) {
-  $("#r-video-box").hidden = v !== "video";
-  $("#r-kw-box").hidden = v !== "keyword";
-  $("#r-hist-box").hidden = v !== "history";
+
+// Relatório do nicho (sob demanda), no painel da direita.
+async function openReport(rid, back = null) {
+  $("#pv").hidden = false;
+  $("#pv-body").innerHTML = `<div class="pv-loading">Carregando…</div>`;
+  try { R.data = await api(`/api/research/${rid}`); } catch (e) { return toast(e.message, "err"); }
+  PV.report = { rid, back };
+  const { research: r, report, report_meta: meta } = R.data;
+  $("#pv-body").innerHTML = `
+    <div class="pv-top">
+      <span class="pv-kicker">${back ? `<span class="link" data-pv-back="${esc(back)}">← voltar ao vídeo</span> · ` : ""}Relatório do nicho</span>
+      <button class="icon-btn" id="pv-close" title="Fechar (Esc)"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <h2 class="pv-title">${esc(r.label)}</h2>
+    <div class="dim small">${R.data.videos.length} vídeos na pesquisa · ${fmtDate(r.created_at)}${meta ? ` · relatório custou ${fmtUSD(meta.cost_usd)}` : ""}</div>
+    ${report ? `<div class="pv-report">${renderReport(report)}</div>
+      <div class="mal-foot dim small"><span class="link" data-report-make="${rid}" data-refresh="1">refazer o relatório (~US$ 0,06)</span></div>`
+      : `<div class="pv-section"><p class="dim small">A IA lê os vídeos e os comentários desta pesquisa e diz o que está funcionando, as brechas,
+        o que o público pede e os 8 melhores vídeos para modelar agora.</p>
+        <button class="btn primary sm" data-report-make="${rid}" ${state.aiEnabled ? "" : "disabled"}>Gerar relatório <span class="btn-note">· ~US$ 0,06</span></button></div>`}`;
 }
-bindSeg($("#r-mode"), showResearchMode);
-$("#r-niches").addEventListener("click", (e) => {
-  const n = e.target.closest("[data-niche]");
-  if (!n) return;
-  const cur = $("#r-kws").value.trim();
-  $("#r-kws").value = cur ? `${cur}\n${n.dataset.niche}` : n.dataset.niche;
-});
-$("#r-link").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#r-start").click(); });
-$("#r-start").addEventListener("click", async () => {
-  const kind = segValue($("#r-mode"));
-  const seed = kind === "video" ? $("#r-link").value.trim() : kind === "keyword" ? $("#r-kws").value.trim() : "";
-  if (kind !== "history" && !seed) return toast(kind === "video" ? "Cole o link do vídeo." : "Escreva pelo menos uma palavra-chave.", "err");
-  closeResearchModal();
-  $("#r-link").value = "";
-  $("#r-kws").value = "";
-  await startResearch({ kind, seed, report: $("#r-report").checked, langs: pickedLangs($("#r-langs")),
-    profile_id: kind === "history" ? +$("#r-hist-profile").value : null });
-});
+document.addEventListener("click", async (e) => {
+  const mk = e.target.closest("[data-report-make]");
+  if (mk) {
+    e.stopPropagation();
+    if (mk.dataset.refresh && !confirm("Refazer o relatório gasta tokens de novo (~US$ 0,06). Continuar?")) return;
+    const rid = +mk.dataset.reportMake, back = PV.report?.back || null;
+    mk.disabled = true;
+    try {
+      watchJob(await api(`/api/research/${rid}/report`, { method: "POST" }), () => { if (!$("#pv").hidden && PV.report?.rid === rid) openReport(rid, back); });
+      toast("IA escrevendo o relatório (1 a 2 minutos)…");
+    } catch (err) { toast(err.message, "err"); mk.disabled = false; }
+    return;
+  }
+  const op = e.target.closest("[data-report-open]");
+  if (op) { e.stopPropagation(); closeRunsModal(); return openReport(+op.dataset.reportOpen, op.dataset.back || null); }
+  const rr = e.target.closest("[data-research-run]");
+  if (rr) {
+    e.stopPropagation();
+    await loadRunOptions();
+    $("#v-run").value = rr.dataset.researchRun;
+    closePreview();
+    go("videos");
+    loadVideos();
+  }
+}, true);
 
 // ---------------------------------------------------------------- idiomas
 
 // Idiomas da busca: a escolha fica lembrada (só neste computador).
-// Período da pesquisa: fica lembrado (só neste computador).
-function selectedPeriod() {
-  try { const v = localStorage.getItem("period"); if (v !== null) return +v; } catch {}
-  return 30;
-}
-document.addEventListener("change", (e) => {
-  const sel = e.target.closest(".period-sel");
-  if (!sel) return;
-  try { localStorage.setItem("period", sel.value); } catch {}
-  $$(".period-sel").forEach((s) => { s.value = sel.value; });
-});
-
 function selectedLangs() {
   try { const v = JSON.parse(localStorage.getItem("langs") || "null"); if (Array.isArray(v) && v.length) return v; } catch {}
   return ["pt"];
@@ -1182,20 +802,51 @@ document.addEventListener("click", (e) => {
   $$(".lang-picker").forEach((p) => { if (p !== picker) renderLangPicker(p); });
 });
 
-// ---------------------------------------------------------------- barra de pesquisa por nicho (Descobertas)
+// ---------------------------------------------------------------- barra de pesquisa por nicho (Descobrir)
 
+// Link do YouTube = pesquisa a partir do vídeo; qualquer outro texto = pesquisa por assunto.
+const YT_LINK = /(youtube\.com\/(watch|shorts\/|live\/)|youtu\.be\/)/i;
 async function nicheSearch() {
   const q = $("#nb-query").value.trim();
-  if (!q) return toast("Escreva um nicho, tema, título ou palavras-chave.", "err");
+  if (!q) return toast("Cole o link de um vídeo ou escreva um assunto.", "err");
   $("#nb-query").value = "";
-  await startResearch({ kind: "keyword", seed: q, report: true, langs: pickedLangs($("#nb-langs")) });
+  await startResearch({ kind: YT_LINK.test(q) ? "video" : "keyword", seed: q, langs: pickedLangs($("#nb-langs")) });
 }
 $("#nb-go").addEventListener("click", nicheSearch);
+
+// Garimpo no perfil: o darkbot faz no Chrome do perfil o caminho que o editor faz à mão.
+// O ponto de partida é obrigatório em perfil coringa ou sem nicho (o nicho dele não serve de busca).
+function openGarimpo(pid) {
+  const p = state.profiles.find((x) => x.id === pid);
+  if (!p) return;
+  state.gPid = pid;
+  state.gNeedSeed = p.kind === "coringa" || !p.niche;
+  $("#g-profile").textContent = p.name;
+  $("#g-seed").value = $("#nb-query").value.trim();
+  $("#g-seed").placeholder = `Link de um vídeo dark do nicho, ou o tema / um título${state.gNeedSeed ? " (obrigatório neste perfil)" : ` (vazio = ${p.niche})`}`;
+  $("#gmodal").hidden = false;
+  setTimeout(() => $("#g-seed").focus(), 50);
+}
+$("#nb-garimpo").addEventListener("click", () => (state.profile ? openGarimpo(state.profile) : openProfilePicker(false)));
+bindSeg($("#g-mode"), () => {});
+$$("[data-gclose]").forEach((b) => b.addEventListener("click", () => { $("#gmodal").hidden = true; }));
+$("#g-start").addEventListener("click", async () => {
+  if (state.gNeedSeed && !$("#g-seed").value.trim())
+    return toast("Este perfil é coringa (ou sem nicho): cole o link de um vídeo dark ou escreva o tema para garimpar.", "err");
+  try {
+    const j = await api(`/api/profiles/${state.gPid}/garimpo`, { method: "POST",
+      body: { seed: $("#g-seed").value.trim(), mode: segValue($("#g-mode")), show_browser: $("#g-show").checked } });
+    $("#gmodal").hidden = true;
+    $("#nb-query").value = "";
+    watchJob(j);
+    toast("Garimpo começou: acompanhe no canto da tela (dá para cancelar por lá).", "ok");
+  } catch (e) { toast(e.message, "err"); }
+});
 $("#nb-query").addEventListener("keydown", (e) => { if (e.key === "Enter") nicheSearch(); });
 
 // ---------------------------------------------------------------- coletas (filtrar / excluir)
 
-const SRC_LABEL = { home: "Home", history: "Histórico", research: "Pesquisa" };
+const SRC_LABEL = { home: "Home", history: "Histórico", research: "Pesquisa", garimpo: "Garimpo" };
 async function loadRunOptions() {
   const runs = (await api(`/api/runs?limit=200${state.profile ? `&profile_id=${state.profile}` : ""}`)).filter((r) => r.status !== "running");
   state.runs = runs;
@@ -1215,6 +866,7 @@ function openRunsModal() {
         <span class="tag ${r.source === "history" ? "via" : "neutral"}">${SRC_LABEL[r.source || "home"]}</span>
         ${r.status === "error" ? `<span class="tag warn">erro</span>` : ""}${r.status === "done" && !r.logged_in ? `<span class="tag fresh">sem login</span>` : ""}
         <div class="dim small">${r.videos_found || 0} vídeos${r.error ? ` · ${esc(r.error)}` : ""}</div></div>
+      ${r.research_id && r.status === "done" ? `<button type="button" class="btn ghost sm" data-report-open="${r.research_id}" title="Relatório do nicho desta pesquisa (sob demanda)">Relatório</button>` : ""}
       ${r.status === "done" ? `<button type="button" class="btn ghost sm" data-runview="${r.id}">Ver só esta</button>` : ""}
     </label>`).join("") : `<div class="empty"><b>Nenhuma coleta</b></div>`;
   updateRunsSel();
@@ -1262,23 +914,19 @@ async function translateList(list, btn) {
     for (const v of [...state.videos, ...(R.data?.videos || [])]) if (r.titles[v.video_id]) v.title_pt = r.titles[v.video_id];
     toast(r.translated ? `${r.translated} títulos traduzidos.` : "Os títulos já estão em português.", "ok");
     renderVideos();
-    if ($(".r-videos")) rerenderResearchVideos();
   } catch (e) { toast(e.message, "err"); }
   btn.disabled = false;
   btn.textContent = old;
 }
 $("#v-translate").addEventListener("click", (e) => translateList(filteredVideos().slice(0, state.vLimit), e.currentTarget));
-document.addEventListener("click", (e) => {
-  const b = e.target.closest("#rv-translate");
-  if (b) translateList(researchFiltered().slice(0, 200), b);
-});
 
 // ---------------------------------------------------------------- prévia do vídeo
 
-const PV = { id: null, data: null };
+const PV = { id: null, data: null, report: null };   // report: o painel está mostrando um relatório
 
 async function openPreview(id, quiet = false) {
   PV.id = id;
+  PV.report = null;
   $("#pv").hidden = false;
   if (!quiet) $("#pv-body").innerHTML = `<div class="pv-loading">Carregando…</div>`;
   try { PV.data = await api(`/api/videos/${id}`); } catch (e) { $("#pv").hidden = true; return toast(e.message, "err"); }
@@ -1287,22 +935,24 @@ async function openPreview(id, quiet = false) {
   const v = PV.data.video;
   if (v.foreign && !v.title_pt && state.aiEnabled) {
     api("/api/translate", { method: "POST", body: { ids: [id] } }).then((r) => {
-      if (PV.id === id && r.titles[id]) { v.title_pt = r.titles[id]; renderPreview(); }
+      if (r.titles[id]) v.title_pt = r.titles[id];
+      if (PV.id === id && !PV.report && r.titles[id]) renderPreview();
     }).catch(() => {});
   }
 }
-const closePreview = () => { $("#pv").hidden = true; PV.id = null; $("#pv-body").innerHTML = ""; };
+const closePreview = () => { $("#pv").hidden = true; PV.id = null; PV.report = null; $("#pv-body").innerHTML = ""; };
 $("#pv").addEventListener("click", (e) => { if (e.target.id === "pv") closePreview(); });
 
 function renderPreview() {
-  const { video: v, comments, analysis: a } = PV.data;
-  const fmtL = PV.data.format_labels;
+  const { video: v, comments, analysis: a, research: rs } = PV.data;
   const link = `https://www.youtube.com/watch?v=${v.video_id}`;
   const conf = { alta: "com certeza", media: "provavelmente", baixa: "não tem certeza" };
-  const darkState = v.channel_dark_manual != null ? (v.channel_dark_manual ? "É canal dark (você marcou)" : "Não é canal dark (você marcou)")
-    : v.channel_format ? `A IA acha que ${v.is_dark ? "é canal dark" : "não é canal dark"} (${FORMAT_TIP[v.channel_format] || v.channel_format}${v.channel_dark_conf ? `; ${conf[v.channel_dark_conf] || v.channel_dark_conf}` : ""})`
-    : "A IA ainda não olhou esse canal";
+  const darkState = v.channel_dark_manual != null ? (v.channel_dark_manual ? "dark (você marcou)" : "não é dark (você marcou)")
+    : v.channel_format ? `${v.is_dark ? "dark" : "não é dark"} para a IA (${FORMAT_TIP[v.channel_format] || v.channel_format}${v.channel_dark_conf ? `; ${conf[v.channel_dark_conf] || v.channel_dark_conf}` : ""})`
+    : "a IA ainda não olhou esse canal";
   const stat = (label, value, tip = "") => `<div class="pv-stat" title="${esc(tip)}"><b>${value}</b><span>${label}</span></div>`;
+  const accel = v.growth_hour != null && v.growth_hour > (v.views_hour || 0);
+  const ok = passesViral(v);
   $("#pv-body").innerHTML = `
     <div class="pv-top">
       <span class="pv-kicker">Prévia do vídeo</span>
@@ -1313,46 +963,38 @@ function renderPreview() {
     <h2 class="pv-title">${esc(v.title)}</h2>
     ${v.title_pt && v.title_pt !== v.title ? `<div class="pv-trans"><span>Tradução</span>${esc(v.title_pt)}</div>`
       : v.foreign ? `<div class="pv-trans dim"><span>Tradução</span>${state.aiEnabled ? "traduzindo…" : "IA desligada"}</div>` : ""}
-    <div class="pv-tags">${langTag(v)}${channelTags(v).join("")}
+    <div class="pv-tags">
+      <span class="tag ${ok ? "good" : "neutral"}" title="Seus parâmetros de viral: ${esc(state.viralInfo?.text || "")}">${ok ? "Viralizando agora" : "Fora dos seus parâmetros"}</span>
+      ${langTag(v)}${channelTags(v).join("")}
       ${v.channel_age_days != null && v.channel_age_days <= 180 ? `<span class="tag new">Canal novo · ${fmtAge(v.channel_age_days)}</span>` : ""}
-      ${v.age_days != null && v.age_days <= 7 ? `<span class="tag fresh">Recente</span>` : ""}
       ${v.hidden ? `<span class="tag warn">Oculto</span>` : ""}</div>
+
+    <div class="pv-stats">
+      ${stat("views por hora", fmt(v.views_hour), "Média de views por hora desde a postagem")}
+      ${stat("ritmo agora", v.growth_hour != null ? `${fmt(v.growth_hour)}/h${accel ? " ↑" : ""}` : "—",
+        v.growth_hour != null ? `Views por hora entre as duas últimas coletas: ${accel ? "está ACELERANDO" : "está desacelerando"}` : "Precisa de duas coletas com 1 hora ou mais de diferença")}
+      ${stat("viralizou", `<span class="mult ${multClass(v.multiplier)}">${fmtMult(v.multiplier)}</span>`, TIP.viralizou)}
+      ${stat("views", fmt(v.views), "Total de views")}
+      ${stat("postado há", ageLong(v.age_days) || "—", "Há quanto tempo o vídeo foi postado")}
+      ${stat("duração", v.duration_s ? fmtDur(v.duration_s) : "—", "Duração do vídeo")}
+    </div>
 
     <div class="pv-actions">
       <button class="btn primary sm" id="pv-yt">Abrir no YouTube</button>
       <button class="btn sm" data-copy-link="${link}">Copiar link</button>
-      <button class="btn sm" data-seed="${v.video_id}" title="Procura vídeos parecidos com este">Achar parecidos</button>
-      <button class="btn sm ${state.modeled.has(v.video_id) ? "primary" : ""}" data-modeled="${v.video_id}" title="${state.modeled.has(v.video_id) ? "Já está em Meu canal (clique para tirar)" : "Você já modelou este vídeo: leva para Meu canal"}">${state.modeled.has(v.video_id) ? "✓ Modelado" : "Já modelei"}</button>
+      <button class="btn sm ${state.modeled.has(v.video_id) ? "primary" : ""}" data-modeled="${v.video_id}" title="${state.modeled.has(v.video_id) ? "Já está nos vídeos que modelei (clique para tirar)" : "Você já modelou este vídeo: entra nos vídeos que modelei (Próximos vídeos)"}">${state.modeled.has(v.video_id) ? "✓ Modelado" : "Já modelei"}</button>
       <button class="btn ghost sm" data-hide="${v.video_id}" ${v.hidden ? `data-unhide="1"` : ""} title="${v.hidden ? "Voltar a mostrar nas listas" : "Esconder este vídeo das listas"}">${v.hidden ? "Mostrar de novo" : "Esconder"}</button>
     </div>
 
-    <div class="pv-stats">
-      ${stat("viralizou", `<span class="mult ${multClass(v.multiplier)}">${fmtMult(v.multiplier)}</span>`, TIP.viralizou)}
-      ${stat("nota para copiar", v.score != null ? v.score.toFixed(1).replace(".", ",") : "—", TIP.nota)}
-      ${stat("views", fmt(v.views), "Total de views")}${stat("views por dia", fmt(v.views_day), "Views por dia, em média")}
-      ${stat("likes", fmt(v.likes), "Curtidas")}${stat("comentários", fmt(v.comments), "Quantidade de comentários")}
-      ${stat("interação", v.engagement != null ? `${String(v.engagement).replace(".", ",")}%` : "—", "De cada 100 pessoas que viram, quantas curtiram ou comentaram")}
-      ${stat("postado há", ageLong(v.age_days) || "—", "Há quanto tempo o vídeo foi postado")}${stat("duração", v.duration_s ? fmtDur(v.duration_s) : "—", "Duração do vídeo")}
-    </div>
-
-    <div class="pv-section pv-channel">
-      <div class="pv-ch-head">
-        ${v.channel_thumb ? `<img src="${esc(v.channel_thumb)}" alt="">` : `<div class="avatar ini">${esc((v.channel_title || "?")[0])}</div>`}
-        <div class="grow"><b>${esc(v.channel_title || "")}</b>
-          <div class="dim small">${fmt(v.subs)} inscritos · ${fmt(v.channel_videos)} vídeos · canal com ${fmtAge(v.channel_age_days)}${v.country ? ` · ${esc(v.country)}` : ""}</div></div>
+    <div class="pv-ch">
+      ${v.channel_thumb ? `<img src="${esc(v.channel_thumb)}" alt="">` : `<div class="avatar ini">${esc((v.channel_title || "?")[0])}</div>`}
+      <div class="grow"><b>${esc(v.channel_title || "")}</b>
+        <div class="dim small">${fmt(v.subs)} inscritos · canal com ${fmtAge(v.channel_age_days)} · ${esc(darkState)}</div></div>
+      <div class="pv-dark-btns">
+        <button class="btn sm ${v.channel_dark_manual === 1 ? "primary" : "ghost"}" data-dark="${v.channel_id}" data-val="1" title="Marcar: este canal é dark (ninguém aparece)">É dark</button>
+        <button class="btn sm ${v.channel_dark_manual === 0 ? "primary" : "ghost"}" data-dark="${v.channel_id}" data-val="0" title="Marcar: este canal não é dark (a IA aprende com isso)">Não é</button>
+        ${v.channel_dark_manual != null ? `<button class="btn ghost sm" data-dark="${v.channel_id}" data-val="" title="Volta a valer o que a IA achou">Desfazer</button>` : ""}
       </div>
-      <div class="pv-dark"><span>${esc(darkState)}</span>
-        <div class="pv-dark-btns">
-          <button class="btn sm ${v.is_dark && v.channel_dark_manual === 1 ? "primary" : ""}" data-dark="${v.channel_id}" data-val="1" title="Marcar: este canal é dark (ninguém aparece)">É dark</button>
-          <button class="btn sm ${v.channel_dark_manual === 0 ? "primary" : ""}" data-dark="${v.channel_id}" data-val="0" title="Marcar: este canal não é dark (a IA aprende com isso)">Não é dark</button>
-          ${v.channel_dark_manual != null ? `<button class="btn ghost sm" data-dark="${v.channel_id}" data-val="" title="Apaga a sua marcação e volta a valer o que a IA achou">Desfazer</button>` : ""}
-        </div></div>
-      ${v.channel_description ? `<p class="pv-desc">${esc(v.channel_description)}</p>` : ""}
-    </div>
-
-    <div class="pv-section">
-      <div class="pv-h"><h3>Ideias de variações</h3><span class="dim small">com a chance de viralizar</span></div>
-      ${renderVariations(PV.data.variations, v.video_id)}
     </div>
 
     <div class="pv-section pv-mal">
@@ -1360,22 +1002,45 @@ function renderPreview() {
       ${renderMalandro(PV.data.malandro, v.video_id)}
     </div>
 
+    <div class="pv-section">
+      <div class="pv-h"><h3>Vídeos parecidos</h3><span class="dim small">pesquisa sob demanda</span></div>
+      ${researchBox(rs, v.video_id)}
+    </div>
 
     <div class="pv-section">
       <div class="pv-h"><h3>Análise com IA</h3>${a ? `<button class="btn ghost sm" id="pv-reanalyze">Refazer</button>` : ""}</div>
-      ${a ? renderAnalysis(a) : `<p class="dim small">Por que funcionou, título, thumbnail, público e como modelar, com 5 títulos prontos no idioma do seu canal. Feita uma vez e guardada.</p>
-        <button class="btn primary sm" id="pv-analyze" ${state.aiEnabled ? "" : "disabled"}>Analisar este vídeo <span class="btn-note">· ~US$ 0,02</span></button>`}
+      ${a ? renderAnalysis(a) : `<p class="dim small">Por que funcionou, título, thumbnail, público e como modelar este vídeo. Feita uma vez e guardada.</p>
+        <button class="btn sm" id="pv-analyze" ${state.aiEnabled ? "" : "disabled"}>Analisar este vídeo <span class="btn-note">· ~US$ 0,02</span></button>`}
     </div>
 
-    <div class="pv-section">
-      <div class="pv-h"><h3>Comentários</h3><span class="dim small">${comments.length ? `os ${comments.length} com mais curtidas` : ""}</span></div>
-      ${comments.length ? comments.map((c) => `<div class="cm"><span class="cm-likes">♥ ${fmt(c.likes)}</span>${esc(c.text)}</div>`).join("")
+    <details class="pv-section pv-more"><summary><h3>Mais detalhes</h3><span class="dim small">curtidas, comentários, descrição, tags</span></summary>
+      <div class="pv-mini">
+        <span><b>${fmt(v.likes)}</b> curtidas</span><span><b>${fmt(v.comments)}</b> comentários</span>
+        <span title="De cada 100 pessoas que viram, quantas curtiram ou comentaram"><b>${v.engagement != null ? `${String(v.engagement).replace(".", ",")}%` : "—"}</b> interação</span>
+        <span><b>${fmt(v.views_day)}</b> views por dia</span>
+      </div>
+      <div class="idea-label">Comentários com mais curtidas</div>
+      ${comments.length ? comments.slice(0, 12).map((c) => `<div class="cm"><span class="cm-likes">♥ ${fmt(c.likes)}</span>${esc(c.text)}</div>`).join("")
         : `<p class="dim small">${v.comments === 0 ? "Sem comentários." : "Comentários indisponíveis (desativados ou sem chave da API)."}</p>`}
-    </div>
+      ${v.description ? `<div class="idea-label">Descrição do vídeo</div><p class="pv-desc">${esc(v.description)}</p>` : ""}
+      ${v.tags && v.tags.length ? `<div class="idea-label">Tags (clique para copiar)</div>
+        <div class="terms" data-copy="${esc(v.tags.join(", "))}">${v.tags.map((t) => `<span class="term sm">${esc(t)}</span>`).join("")}</div>` : ""}
+      ${v.channel_description ? `<div class="idea-label">Sobre o canal</div><p class="pv-desc">${esc(v.channel_description)}</p>` : ""}
+    </details>`;
+}
 
-    ${v.description ? `<details class="pv-section"><summary><h3>Descrição do vídeo</h3></summary><p class="pv-desc">${esc(v.description)}</p></details>` : ""}
-    ${v.tags && v.tags.length ? `<div class="pv-section"><div class="pv-h"><h3>Tags</h3></div>
-      <div class="terms" data-copy="${esc(v.tags.join(", "))}">${v.tags.map((t) => `<span class="term sm">${esc(t)}</span>`).join("")}</div></div>` : ""}`;
+// Pesquisa de parecidos a partir do vídeo: sob demanda (economia); depois, ver na lista e o relatório do nicho.
+function researchBox(rs, id) {
+  if (!rs) return `<p class="dim small">O darkbot procura vídeos parecidos com este: busca em vários idiomas, entra nos sugeridos
+    e traz os que viralizam para a sua lista. Uns 2 minutos.</p>
+    <button class="btn primary sm" data-seed="${id}" ${state.aiEnabled ? "" : "disabled"}>Achar parecidos <span class="btn-note">· ~US$ 0,04</span></button>`;
+  if (rs.status === "running") return `<p class="dim small">Procurando parecidos… acompanhe no canto da tela.</p>`;
+  return `<div class="pv-rs">
+    <span><b>${rs.videos_found || 0}</b> parecidos achados em ${fmtDate(rs.created_at)}</span>
+    ${rs.run_id ? `<button class="btn sm" data-research-run="${rs.run_id}" title="A lista de Viralizando agora mostra só eles">Ver na lista</button>` : ""}
+    <button class="btn ${rs.has_report ? "" : "ghost"} sm" data-report-open="${rs.id}" data-back="${id}" title="O que funciona, brechas, o que o público pede e os melhores para modelar">${rs.has_report ? "Ver relatório do nicho" : "Relatório do nicho"}</button>
+    <span class="link small" data-seed="${id}" title="Faz a pesquisa de novo (~US$ 0,04)">procurar de novo</span>
+  </div>`;
 }
 
 function renderAnalysis(a) {
@@ -1385,13 +1050,15 @@ function renderAnalysis(a) {
     <div class="idea-label">Por que a capa (thumbnail) funciona</div><p class="pv-p">${esc(a.thumbnail)}</p>
     <div class="idea-label">O que o público achou</div><p class="pv-p">${esc(a.audience)}</p>
     <div class="idea-label">Como fazer um parecido</div><ol class="idea-structure">${a.how_to_model.map((x) => `<li>${esc(x)}</li>`).join("")}</ol>
-    <div class="idea-label">Títulos prontos para o seu vídeo</div>
-    <div class="formulas">${a.titles.map((t) => `<div class="formula" data-copy="${esc(t)}" title="Copiar">${esc(t)}</div>`).join("")}</div>
     <div class="idea-label">Cuidado com</div><ul class="r-bullets avoid">${a.risks.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
 }
 
 $("#pv-body").addEventListener("click", async (e) => {
   if (e.target.closest("#pv-close")) return closePreview();
+  const bk = e.target.closest("[data-pv-back]");
+  if (bk) return openPreview(bk.dataset.pvBack);
+  const kw = e.target.closest("[data-kw]");
+  if (kw) return startResearch({ kind: "keyword", seed: kw.dataset.kw });
   const mv = e.target.closest("[data-vref]");
   if (mv) return openPreview(mv.dataset.vref);
   if (e.target.closest("#pv-yt")) return openYT(`watch?v=${PV.id}`);
@@ -1414,48 +1081,6 @@ $("#pv-body").addEventListener("click", async (e) => {
     } catch (err) { toast(err.message, "err"); an.disabled = false; an.textContent = "Tentar de novo"; }
   }
 });
-
-// ---------------------------------------------------------------- ideias de variações (chance de viralizar)
-
-function renderVariations(d, videoId) {
-  if (!d) {
-    return `<p class="dim small">A IA cria 10 versões deste vídeo trocando os detalhes (quem faz, o objeto, o país, a marca…)
-      e diz a <b>chance de cada uma viralizar</b>, olhando os vídeos parecidos que já viralizaram, os idiomas e o que o público pede.</p>
-      <button class="btn primary sm" data-variations="${videoId}" ${state.aiEnabled ? "" : "disabled"}>Criar ideias de variações <span class="btn-note">· ~US$ 0,02</span></button>`;
-  }
-  const list = [...d.variations].sort((a, b) => b.chance - a.chance);
-  const lvl = (c) => (c >= 60 ? "hi" : c >= 40 ? "mid" : "lo");
-  return `
-    ${d.fits ? `<div class="var-template" data-copy="${esc(d.template)}" title="Clique para copiar"><span>Molde do título</span>${esc(d.template)}</div>`
-      : `<div class="alert info">Este vídeo não dá muito para variar trocando detalhes.</div>`}
-    <p class="var-note">${esc(d.note)}</p>
-    <div class="var-list">${list.map((v) => `
-      <div class="var ${lvl(v.chance)}">
-        <div class="var-chance" title="Chance de viralizar (estimativa da IA com base nos dados do nicho)"><b>${v.chance}%</b><i style="width:${v.chance}%"></i></div>
-        <div class="var-body">
-          <div class="var-title" data-copy="${esc(v.title)}" title="Clique para copiar">${esc(v.title)}</div>
-          <div class="var-meta"><span class="tag neutral" title="O que mudou em relação ao original">${esc(v.changes)}</span></div>
-          <div class="var-why">${esc(v.why)}</div>
-        </div>
-      </div>`).join("")}</div>
-    <div class="mal-foot dim small"><span class="link" data-variations="${videoId}" data-refresh="1">refazer (~US$ 0,02)</span></div>`;
-}
-
-document.addEventListener("click", async (e) => {
-  const b = e.target.closest("[data-variations]");
-  if (!b) return;
-  e.stopPropagation();
-  const refresh = !!b.dataset.refresh;
-  if (refresh && !confirm("Refazer as ideias de variações (~US$ 0,02)?")) return;
-  const id = b.dataset.variations;
-  b.disabled = true;
-  b.innerHTML = "IA criando as variações… (uns 15 segundos)";
-  try {
-    const r = await api(`/api/videos/${id}/variations`, { method: "POST", body: { refresh } });
-    if (PV.id === id && PV.data) { PV.data.variations = r; renderPreview(); }
-    if (R.data && R.data.research.seed === id) { R.data.variations = r; renderResearch(); }
-  } catch (err) { toast(err.message, "err"); b.disabled = false; b.textContent = "Tentar de novo"; }
-}, true);
 
 // ---------------------------------------------------------------- Método Malandro (radar de línguas)
 
@@ -1511,6 +1136,10 @@ function renderMalandro(m, videoId, open = false) {
     ${malandroRadar(m)}
     ${free.length ? `<div class="mal-free"><span>Ninguém fez em:</span>${free.map((l) => `<b>${flagImg(l.code)} ${esc(l.name)}</b>`).join("")}</div>`
       : `<div class="mal-free bad">Esse vídeo já foi feito em todas as línguas pesquisadas.</div>`}
+    ${m.paises ? renderPaises(m.paises, m.video_id) : `<div class="paises-cta">
+      <p class="dim small"><b>E em que países esse conteúdo venderia?</b> O darkbot mede a <b>procura</b> em 24 países (o que as pessoas
+        buscam no YouTube de lá e como os vídeos do tema estão indo no último mês) e cruza com <b>quem já fez</b> esse vídeo em cada idioma.</p>
+      <button class="btn sm" data-paises-run="${m.video_id}" ${state.aiEnabled ? "" : "disabled"}>Ver países com procura e sem oferta <span class="btn-note">· ~US$ 0,03</span></button></div>`}
     <details class="mal-details" ${open ? "open" : ""}><summary class="btn sm mal-btn">Ver os vídeos de cada língua</summary>
       <div class="mal-langs">${langs.map((l) => {
         const [lab, cls] = MAL_STATUS[l.status];
@@ -1529,6 +1158,56 @@ function renderMalandro(m, videoId, open = false) {
   </div>`;
 }
 
+// Países: procura (buscas e vídeos do tema no país) x oferta (quem já fez esse vídeo no idioma).
+const DEMAND = { alta: ["Procura alta", "good"], media: ["Procura média", "warn"], baixa: ["Procura baixa", "neutral"] };
+const flagCountry = (cc) => `<img class="flag" src="https://flagcdn.com/w20/${cc.toLowerCase()}.png" alt="${cc}" onerror="this.style.display='none'">`;
+function renderPaises(p, videoId) {
+  if (!p.markets) return `<div class="paises-cta"><p class="dim small">Medição antiga: refaça para ver por mercado.</p>
+    <button class="btn sm" data-paises-run="${videoId}">Medir de novo <span class="btn-note">· ~US$ 0,03</span></button></div>`;
+  const card = (c, i) => {
+    const [dl, dc] = DEMAND[c.level], [sl, sc] = MAL_STATUS[c.status];
+    return `<div class="pais">
+      <div class="pais-head"><span class="pais-rank">${i + 1}</span>${flagImg(c.lang)}<b>${esc(c.lang_name)}</b>
+        <span class="tag ${dc}" title="Procura medida: buscas que o YouTube completa lá, vídeos do tema com tração no último mês e views por hora típicas">${dl}</span>
+        <span class="tag ${sc}" title="Quem já fez ESTE vídeo nesse idioma (Método Malandro)">${sl}</span>
+        ${c.original ? `<span class="tag via" title="O idioma do vídeo original">idioma do vídeo</span>` : ""}
+        <span class="pais-bar" title="Nota de oportunidade: procura × oferta"><i style="width:${Math.round(Math.min(c.score, 1) * 100)}%"></i></span></div>
+      <div class="pais-countries">${c.countries.map((x) =>
+        `<span class="${x.auto ? "" : "dim"}" title="${x.auto ? "O YouTube desse país completa buscas sobre o tema" : "O YouTube desse país não completa nada sobre o tema"}">${flagCountry(x.country)} ${esc(x.name)}</span>`).join("")}</div>
+      <div class="pais-nums"><span title="Vídeos do tema, nesse idioma, postados no último mês que estão ganhando 30+ views por hora">${c.traction} ${c.traction === 1 ? "vídeo" : "vídeos"} do tema ganhando views no último mês</span> · ${fmt(c.vph_typical)}/h típico</div>
+      ${c.why ? `<div class="pais-why">${esc(c.why)}</div>` : ""}
+      ${c.adapt ? `<div class="pais-adapt"><span>Adaptar</span>${esc(c.adapt)}</div>` : ""}
+      ${c.countries[0]?.suggestions.length ? `<div class="pais-sugg"><span title="O que as pessoas começam a digitar e o YouTube completa, em ${esc(c.countries[0].name)}">Buscam em ${esc(c.countries[0].name)}:</span>${c.countries[0].suggestions.slice(0, 5).map((s) => `<i>${esc(s)}</i>`).join("")}</div>` : ""}
+      ${c.title ? `<div class="mal-title" data-copy="${esc(c.title)}" title="Clique para copiar"><span>Título pronto nesse idioma</span>${esc(c.title)}</div>` : ""}
+      ${c.best ? `<div class="pais-best dim small" data-vref="${c.best.video_id}" title="O vídeo do tema que mais está ganhando views lá">Mais forte do tema lá: <span class="link">${esc(c.best.title)}</span> · ${fmt(c.best.vph)}/h</div>` : ""}
+    </div>`;
+  };
+  const top = p.markets.filter((c) => c.score > 0 && c.level !== "baixa").slice(0, 6);
+  const orig = p.markets.find((c) => c.original);
+  const nCountries = p.markets.reduce((n, mk) => n + mk.countries.length, 0);
+  return `<div class="paises">
+    <div class="paises-h"><h4>Onde há procura e ninguém faz</h4><span class="dim small">${nCountries} países, ${p.markets.length} idiomas</span></div>
+    <p class="paises-sum">${esc(p.summary)}</p>
+    ${top.map(card).join("")}
+    ${orig ? `<div class="dim small paises-orig">${flagImg(orig.lang)} ${esc(orig.lang_name)} é o idioma do vídeo original: já existe lá, não entra como oportunidade.</div>` : ""}
+    <details class="paises-all"><summary class="btn sm mal-btn">Ver todos os ${p.markets.length} idiomas</summary>
+      <div class="paises-table">${p.markets.map((c) => `<div class="pt-row">
+        ${flagImg(c.lang)}<span class="pt-name">${esc(c.lang_name)}</span><span class="tag ${DEMAND[c.level][1]}">${DEMAND[c.level][0]}</span>
+        <span class="tag ${MAL_STATUS[c.status][1]}">${MAL_STATUS[c.status][0]}</span>
+        <span class="dim small">${c.countries.map((x) => `${esc(x.name)} ${x.auto}`).join(" · ")} · ${c.traction} com tração</span></div>`).join("")}</div>
+    </details>
+    <div class="mal-foot dim small">${p.comment_signals ? `Nos comentários: ${esc(p.comment_signals)}<br>` : ""}Feito em ${fmtDate(p.created_at)}${p.cost_usd != null ? ` · ${fmtUSD(p.cost_usd)}` : ""} · <span class="link" data-paises-run="${videoId}" data-refresh="1">refazer</span></div>
+  </div>`;
+}
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-paises-run]");
+  if (!b) return;
+  e.stopPropagation();
+  if (b.dataset.refresh && !confirm("Medir os países de novo (~US$ 0,03)?")) return;
+  try { watchJob(await api(`/api/malandro/${b.dataset.paisesRun}/paises`, { method: "POST" })); toast("Medindo a procura em 24 países… (uns 30 segundos)"); }
+  catch (err) { toast(err.message, "err"); }
+}, true);
+
 // Rodar/refazer o Método Malandro (prévia ou pesquisa).
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-malandro-run]");
@@ -1541,7 +1220,29 @@ document.addEventListener("click", async (e) => {
 
 // ---------------------------------------------------------------- configurações
 
+function renderViralForm() {
+  const p = state.viral, i = state.viralInfo;
+  for (const k of ["max_days", "min_views", "min_vph", "min_mult", "max_subs"]) $(`#vp-${k}`).value = p[k];
+  $("#vp-only_dark").checked = p.only_dark;
+  $("#vp-sort").innerHTML = Object.entries(i.sorts).map(([k, l]) => `<option value="${k}" ${k === p.sort ? "selected" : ""}>${esc(l)}</option>`).join("");
+  $("#vp-text").textContent = `Valendo agora: ${i.text}.`;
+}
+async function saveViral(body) {
+  try {
+    state.viralInfo = await api("/api/viral", { method: "POST", body });
+    state.viral = state.viralInfo.params;
+    renderViralForm(); renderParamsChip(); renderVideos();
+    toast("Parâmetros salvos. Valem para o app inteiro.", "ok");
+  } catch (e) { toast(e.message, "err"); }
+}
+$("#vp-save").addEventListener("click", () => saveViral({
+  max_days: +$("#vp-max_days").value || 1, min_views: +$("#vp-min_views").value || 0, min_vph: +$("#vp-min_vph").value || 0,
+  min_mult: +$("#vp-min_mult").value || 0, max_subs: +$("#vp-max_subs").value || 0,
+  only_dark: $("#vp-only_dark").checked, sort: $("#vp-sort").value }));
+$("#vp-reset").addEventListener("click", () => saveViral(state.viralInfo.defaults));
+
 async function loadSettings() {
+  renderViralForm();
   const s = await api("/api/settings");
   const st = $("#s-status");
   st.className = `hint ${s.youtube_api_key_set ? "ok" : ""}`;
@@ -1708,7 +1409,7 @@ $("#jobs").addEventListener("click", async (e) => {
   try { await api(`/api/jobs/${b.dataset.cancel}/cancel`, { method: "POST" }); } catch (err) { toast(err.message, "err"); }
 });
 
-function watchJob(j) {
+function watchJob(j, onDone = null) {
   if (state.watching.has(j.id)) return;
   state.watching.add(j.id);
   renderJob(j);
@@ -1720,8 +1421,9 @@ function watchJob(j) {
     if (j.status === "error") $(".job-x", el).addEventListener("click", () => el.remove());
     // Erro fica mais tempo para dar para ler (o detalhe também fica no histórico de coletas).
     setTimeout(() => el.remove(), j.status === "error" ? 12000 : 4000);
-    refreshAll();
-    if (j.kind === "malandro" && !$("#pv").hidden && PV.id) openPreview(PV.id, true);
+    await refreshAll();
+    if (j.status === "done" && onDone) onDone(j);
+    if (j.kind === "malandro" && !$("#pv").hidden && PV.id && !PV.report) openPreview(PV.id, true);
   };
   setTimeout(tick, 500);
 }
@@ -1753,16 +1455,13 @@ async function refreshAll() {
   await loadRunOptions();
   await Promise.all([loadVideos(), loadOverview()]);
   if ($("#page-profiles").classList.contains("active")) loadProfiles();
-  if ($("#page-channels").classList.contains("active")) loadChannels();
-  if ($("#page-titles").classList.contains("active")) loadTitles();
-  if ($("#page-research").classList.contains("active")) loadResearch();
   if ($("#page-next").classList.contains("active")) loadNext();
 }
 
 (async () => {
   state.langs = await api("/api/languages");
   renderLangPicker($("#nb-langs"));
-  $$(".period-sel").forEach((s) => { s.value = String(selectedPeriod()); });
+  await loadViral();
   state.aiEnabled = (await api("/api/settings")).ai_enabled;
   // Perfil em uso: o último escolhido; se não houver (ou foi apagado), pede para escolher.
   state.profiles = await api("/api/profiles");
@@ -1773,7 +1472,7 @@ async function refreshAll() {
   (await api("/api/jobs")).filter((j) => j.status === "running").forEach(watchJob);
 })();
 
-// ---------------------------------------------------------------- Meu canal (o "após": modelados, DNA, mapa, próximos)
+// ---------------------------------------------------------------- Próximos vídeos (modelados, DNA, mapa e os vídeos reais para modelar)
 
 const NX = { runs: [], data: null, queue: [], modeled: [], dna: null, kinds: {}, boldness: {} };
 const NX_KIND_TIP = {
@@ -1793,7 +1492,7 @@ const TERR = { seu: ["Seu território", "Assuntos que você já faz e que seguem
   saturado: ["Saturado", "Muita gente já está fazendo: difícil se destacar"] };
 const boldness = () => { try { return localStorage.getItem("boldness") || "equilibrado"; } catch { return "equilibrado"; } };
 
-// Vídeos modelados do perfil em uso (para marcar "Já modelei" em Descobertas e na prévia).
+// Vídeos modelados do perfil em uso (para marcar "Já modelei" em Descobrir e na prévia).
 state.modeled = new Map();
 async function loadModeledIds() {
   state.modeled = new Map();
@@ -1803,7 +1502,7 @@ async function loadModeledIds() {
 
 async function loadNext(runId = null) {
   if (!state.profile) {
-    $("#mc-modeled").innerHTML = `<div class="empty"><b>Escolha o perfil em uso</b>Meu canal é do perfil que você está usando.</div>`;
+    $("#mc-modeled").innerHTML = `<div class="empty"><b>Escolha o perfil em uso</b>Próximos vídeos é do perfil que você está usando.</div>`;
     ["#mc-run", "#mc-result", "#mc-dna", "#mc-queue"].forEach((s) => ($(s).innerHTML = ""));
     return;
   }
@@ -1837,7 +1536,7 @@ function renderModeled() {
       <button class="btn primary sm" type="submit">Adicionar</button>
     </form>
     ${NX.modeled.length ? `<div class="mc-list">${NX.modeled.map(card).join("")}</div>`
-      : `<p class="dim small">Nenhum ainda. Cole o link aqui, ou use o botão <b>Já modelei</b> nas linhas de Descobertas e na prévia de um vídeo.</p>`}`;
+      : `<p class="dim small">Nenhum ainda. Cole o link aqui, ou use o botão <b>Já modelei</b> nas linhas de Descobrir e na prévia de um vídeo.</p>`}`;
 }
 
 function renderDNA() {
@@ -1863,26 +1562,24 @@ function renderDNA() {
 function renderRun() {
   const b = boldness();
   $("#mc-run").innerHTML = `
-    <div class="grow"><h3>Próximos vídeos</h3><p id="mc-bold-tip">${esc(BOLD_TIP[b])}</p></div>
+    <div class="grow"><h3>Achar os próximos vídeos</h3><p id="mc-bold-tip">${esc(BOLD_TIP[b])}</p></div>
     <div class="field"><span>Ousadia</span>
       <div class="seg" id="mc-bold">${Object.keys(BOLD_TIP).map((k) => `<button data-v="${k}" class="${k === b ? "on" : ""}" title="${esc(BOLD_TIP[k])}">${esc(NX.boldness[k] || k)}</button>`).join("")}</div></div>
-    <button class="btn primary" id="nx-run" ${state.aiEnabled ? "" : "disabled"} title="Busca o que está em alta agora no nicho, monta o mapa de território e os próximos vídeos">
-      <svg viewBox="0 0 24 24"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/></svg>Montar mapa e próximos <span class="btn-note">· ~US$ 0,05</span></button>`;
+    <button class="btn primary" id="nx-run" ${state.aiEnabled ? "" : "disabled"} title="Busca o que está viralizando agora no seu nicho (pelos seus parâmetros), escolhe os vídeos reais para você modelar e monta o mapa">
+      <svg viewBox="0 0 24 24"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/></svg>Achar os próximos <span class="btn-note">· ~US$ 0,05</span></button>`;
   bindSeg($("#mc-bold"), (v) => { try { localStorage.setItem("boldness", v); } catch {} $("#mc-bold-tip").textContent = BOLD_TIP[v]; });
 }
 
-const inQueue = (title) => NX.queue.find((x) => x.title.toLowerCase() === title.toLowerCase());
-const inModeled = (title) => NX.modeled.find((x) => (x.my_title || "").toLowerCase() === title.toLowerCase());
 const refThumbs = (refs, n = 3) => refs.slice(0, n).map((r) => `<img loading="lazy" src="https://i.ytimg.com/vi/${r.video_id}/mqdefault.jpg" alt="" data-vref="${r.video_id}" title="${esc(r.title)} · viralizou ${fmtMult(r.multiplier)} · há ${ageLong(r.age_days)}">`).join("");
 
 function renderNext() {
   const d = NX.data;
-  if (!d) {
-    $("#mc-result").innerHTML = `<div class="box"><div class="empty"><b>Nenhuma rodada ainda</b>
-      Adicione os vídeos que você já modelou, escolha a ousadia e clique em <b>Montar mapa e próximos</b>.</div></div>`;
+  if (!d || d.version !== 3) {
+    $("#mc-result").innerHTML = `<div class="box"><div class="empty"><b>${d ? "Esta rodada é do jeito antigo" : "Nenhuma rodada ainda"}</b>
+      ${d ? "Ela tinha títulos inventados pela IA. Clique em \"Achar os próximos\" para ver vídeos reais." :
+      "Adicione os vídeos que você já modelou, escolha a ousadia e clique em \"Achar os próximos\": o darkbot busca o que está viralizando agora no seu nicho (pelos seus parâmetros) e escolhe os vídeos reais que você deve modelar."}</div></div>`;
     return;
   }
-  const lvl = (c) => (c >= 60 ? "hi" : c >= 40 ? "mid" : "lo");
   const col = (st) => {
     const list = d.territories.filter((t) => t.status === st);
     return `<div class="terr-col ${st}"><h4 title="${esc(TERR[st][1])}"><i></i>${TERR[st][0]}</h4>
@@ -1892,29 +1589,37 @@ function renderNext() {
   $("#mc-result").innerHTML = `
     <div class="nx-strategy"><span>A estratégia agora · ousadia ${esc(NX.boldness[d.boldness] || "")}</span><p>${esc(d.strategy)}</p></div>
     <div class="nx-meta"><span title="Como a IA entendeu o seu nicho">Nicho: ${esc(d.niche)}</span>
-      <span>${fmtDate(d.created_at)} · ${d.pool.length} vídeos em alta analisados · ${fmtUSD(d.cost_usd)}</span></div>
-    ${d.territories.length ? `<div class="box" style="margin-bottom:12px"><div class="box-head"><h3>Mapa de território</h3><span class="dim small">o que está em alta no nicho, agrupado por assunto</span></div>
-      <div class="terr">${col("seu")}${col("fronteira")}${col("saturado")}</div></div>` : ""}
-    <div class="var-list">${d.items.map((it, i) => {
-      const q = inQueue(it.title), md = inModeled(it.title);
-      return `
-      <div class="var nx-item ${lvl(it.chance)}">
-        <div class="var-chance" title="Chance de viralizar (estimativa da IA com base nos vídeos em alta)"><b>${it.chance}%</b><i style="width:${it.chance}%"></i></div>
-        <div class="var-body">
-          <div class="var-title" data-copy="${esc(it.title)}" title="Clique para copiar">${i + 1}. ${esc(it.title)}</div>
-          <div><span class="tag k-${it.kind}" title="${esc(NX_KIND_TIP[it.kind] || "")}">${esc(NX.kinds[it.kind] || it.kind)}</span>
+      <span>${fmtDate(d.created_at)} · ${d.pool.length} vídeos viralizando analisados · ${fmtUSD(d.cost_usd)}</span></div>
+    <div class="nx-params" title="Só entram vídeos que batem os seus parâmetros (Configurações)">Seus parâmetros nesta rodada: ${esc(d.params || "")}</div>
+    <div class="box" style="margin-bottom:12px"><div class="box-head"><h3>Modele estes, nesta ordem</h3><span class="dim small">vídeos reais viralizando agora no seu nicho</span></div>
+    <div class="nx-list">${d.items.map((it, i) => {
+      const q = NX.queue.find((x) => x.video_id === it.video_id), md = state.modeled.has(it.video_id);
+      return `<div class="nx-card">
+        <span class="rank">${i + 1}</span>
+        <div class="thumb nx-thumb" data-vref="${it.video_id}" title="Ver a prévia"><img loading="lazy" src="https://i.ytimg.com/vi/${it.video_id}/mqdefault.jpg" alt=""></div>
+        <div class="nx-body">
+          <div class="otitle" data-vref="${it.video_id}" title="${esc(it.title)}">${esc(it.title)}</div>
+          <div class="v-meta"><span class="ch">${esc(it.channel_title || "")}</span>${langTag(it)}
+            <span class="tag k-${it.kind}" title="${esc(NX_KIND_TIP[it.kind] || "")}">${esc(NX.kinds[it.kind] || it.kind)}</span>
             ${it.territory ? `<span class="tag terr-tag" title="Território do mapa">${esc(it.territory)}</span>` : ""}</div>
+          <div class="nx-nums">
+            <span title="Views por hora desde que foi postado"><b class="vph">${fmt(it.views_hour)}</b> views/hora</span>
+            <span title="Total de views"><b>${fmt(it.views)}</b> views</span>
+            <span class="mult ${multClass(it.multiplier)}" title="${viralTip(it.multiplier)}">${fmtMult(it.multiplier)}</span>
+            <span>postado há ${ageLong(it.age_days ?? (it.age_hours != null ? it.age_hours / 24 : null)) || "?"}</span>
+          </div>
           <div class="var-why">${esc(it.why)}</div>
-          ${it.hook ? `<div class="nx-hook" data-copy="${esc(it.hook)}" title="Clique para copiar o gancho">${esc(it.hook)}</div>` : ""}
-          ${it.refs.length ? `<div class="nx-refs">${it.refs.map((r) => `
-            <div class="nx-ref" data-vref="${r.video_id}" title="${esc(r.title)} · ${esc(r.channel_title || "")} · ${fmt(r.views)} views · postado há ${ageLong(r.age_days)}">
-              <img loading="lazy" src="https://i.ytimg.com/vi/${r.video_id}/mqdefault.jpg" alt=""><span>${esc(r.title)}</span><b class="${multClass(r.multiplier)}">${fmtMult(r.multiplier)}</b></div>`).join("")}</div>` : ""}
-          <div class="nx-actions">${md ? `<span class="tag new">Já fiz</span>` : q ? `<span class="tag neutral">Na sua fila</span>`
-            : `<button class="btn sm" data-nx-add="${i}" title="Coloca na sua fila (vou fazer)">+ Vou fazer</button>
-               <button class="btn ghost sm" data-nx-add="${i}" data-done="1" title="Marca que você já fez um vídeo assim (entra nos modelados)">Já fiz</button>`}</div>
+        </div>
+        <div class="nx-actions">
+          <button class="btn ghost sm" data-vref="${it.video_id}">Prévia</button>
+          ${md ? `<span class="tag new">Já modelei</span>` : q ? `<span class="tag neutral">Na sua fila</span>`
+            : `<button class="btn primary sm" data-nx-add="${i}" title="Coloca na sua fila (Vou fazer)">+ Vou fazer</button>
+               <button class="btn ghost sm" data-modeled="${it.video_id}" title="Você já modelou este vídeo">Já modelei</button>`}
         </div>
       </div>`;
-    }).join("")}</div>`;
+    }).join("")}</div></div>
+    ${d.territories.length ? `<div class="box"><div class="box-head"><h3>Mapa de território</h3><span class="dim small">o que está viralizando no nicho, agrupado por assunto</span></div>
+      <div class="terr">${col("seu")}${col("fronteira")}${col("saturado")}</div></div>` : ""}`;
 }
 
 function renderQueue() {
@@ -1925,14 +1630,14 @@ function renderQueue() {
       <button class="q-check" data-q-done="${x.id}" title="Fiz! Vai para os vídeos modelados"><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></button>
       <span class="q-title" ${x.video_id ? `data-vref="${x.video_id}" style="cursor:pointer"` : ""} title="${esc(x.note || x.title)}">${esc(x.title)}</span>
       <button class="icon-btn" data-q-del="${x.id}" title="Tirar da fila"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>`).join("")
-      : `<p class="dim small">Nada na fila. Use "+ Vou fazer" nas sugestões.</p>`}`;
+      : `<p class="dim small">Nada na fila. Use "+ Vou fazer" nos vídeos sugeridos.</p>`}`;
 }
 
 async function startNext() {
   if (!state.profile) return toast("Escolha o perfil em uso primeiro.", "err");
   try {
     watchJob(await api("/api/next", { method: "POST", body: { profile_id: state.profile, boldness: boldness() } }));
-    toast("Montando o mapa e os próximos vídeos… (cerca de 1 minuto)");
+    toast("Buscando o que está viralizando agora no seu nicho… (cerca de 1 minuto)");
   } catch (e) { toast(e.message, "err"); }
 }
 
@@ -1949,12 +1654,8 @@ $("#page-next").addEventListener("click", async (e) => {
     const add = t.closest("[data-nx-add]");
     if (add) {
       const it = NX.data.items[+add.dataset.nxAdd];
-      if (add.dataset.done) {
-        await api("/api/modeled", { method: "POST", body: { profile_id: state.profile, video: it.refs[0]?.video_id || null, my_title: it.title } });
-        toast("Entrou nos vídeos modelados.", "ok");
-      } else {
-        await api("/api/queue", { method: "POST", body: { profile_id: state.profile, title: it.title, kind: it.kind, note: it.why, video_id: it.refs[0]?.video_id || null } });
-      }
+      await api("/api/queue", { method: "POST", body: { profile_id: state.profile, title: it.title, kind: it.kind, note: it.why, video_id: it.video_id } });
+      toast("Na sua fila (Vou fazer).", "ok");
       return loadNext(NX.data.id);
     }
     const qd = t.closest("[data-q-done]");
@@ -2004,10 +1705,10 @@ $("#page-next").addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message, "err"); loadNext(NX.data?.id); }
 });
 
-// "Já modelei" (linhas de Descobertas e prévia): liga/desliga o vídeo na lista de modelados do perfil em uso.
+// "Já modelei" (linhas de Descobrir e prévia): liga/desliga o vídeo na lista de modelados do perfil em uso.
 const modeledBtn = (id) => {
   const on = state.modeled.has(id);
-  return `<button class="icon-btn ${on ? "on" : ""}" data-modeled="${id}" title="${on ? "Já modelado (clique para tirar de Meu canal)" : "Já modelei este: leva para Meu canal"}">
+  return `<button class="icon-btn ${on ? "on" : ""}" data-modeled="${id}" title="${on ? "Já modelado (clique para tirar)" : "Já modelei este: entra nos vídeos que modelei (Próximos vídeos)"}">
     <svg viewBox="0 0 24 24"><path d="M4 18V8l8-5 8 5v10"/><path d="M9 21v-6h6v6"/>${on ? `<path d="M8.5 12l2.5 2.5 4.5-5"/>` : ""}</svg></button>`;
 };
 document.addEventListener("click", async (e) => {
@@ -2020,14 +1721,14 @@ document.addEventListener("click", async (e) => {
     if (state.modeled.has(id)) {
       await api(`/api/modeled/${state.modeled.get(id)}`, { method: "DELETE" });
       state.modeled.delete(id);
-      toast("Tirado de Meu canal.", "ok");
+      toast("Tirado dos vídeos que modelei.", "ok");
     } else {
       const r = await api("/api/modeled", { method: "POST", body: { profile_id: state.profile, video: id } });
       state.modeled.set(id, r.id);
-      toast("Levado para Meu canal (vídeos que modelei).", "ok");
+      toast("Entrou nos vídeos que modelei (Próximos vídeos).", "ok");
     }
     renderVideos();
-    if (!$("#pv").hidden && PV.id) renderPreview();
+    if (!$("#pv").hidden && PV.id && !PV.report) renderPreview();
     if ($("#page-next").classList.contains("active")) loadNext(NX.data?.id);
   } catch (err) { toast(err.message, "err"); }
 }, true);

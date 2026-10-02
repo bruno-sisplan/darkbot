@@ -12,7 +12,8 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import ai, analytics, chrome_profiles, config, db, jobs, malandro, proximos, research, titles, youtube_api, youtube_web
+from . import (ai, analytics, chrome_profiles, config, db, garimpo, jobs, malandro, paises, proximos, research, titles,
+               viral, youtube_api, youtube_web)
 from .paths import PROFILES_DIR, UI_DIR
 
 app = FastAPI(title="darkbot")
@@ -137,6 +138,27 @@ def train_profile(pid: int, body: TrainIn):
     return {"ok": True, "query": q}
 
 
+class GarimpoIn(BaseModel):
+    seed: str = ""              # link de um vídeo dark do nicho, ou tema/título (vazio = nicho do perfil)
+    mode: str = "normal"        # rapido, normal, profundo
+    show_browser: bool = False
+
+
+@app.post("/api/profiles/{pid}/garimpo")
+def garimpo_start(pid: int, body: GarimpoIn):
+    """O darkbot faz no Chrome do perfil o que o editor faz à mão: assiste, entra nos sugeridos e nos canais do
+    nicho, aquece o perfil e manda o que é dark e do nicho para Descobrir."""
+    p = db.row("SELECT name FROM profiles WHERE id=?", (pid,))
+    if not p:
+        raise HTTPException(404, "Perfil não encontrado.")
+    try:
+        job = jobs.start("garimpo", f"Garimpo · {p['name']}", garimpo.run, pid, body.seed, body.mode,
+                         body.show_browser, key=f"profile:{pid}", cancellable=True)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    return job.to_dict()
+
+
 @app.post("/api/profiles/{pid}/collect")
 def collect(pid: int, body: CollectIn):
     p = db.row("SELECT name FROM profiles WHERE id=?", (pid,))
@@ -183,7 +205,7 @@ class ResearchIn(BaseModel):
     report: bool = True
     langs: list[str] = ["pt"]  # idiomas da busca (códigos de ai.LANGUAGES)
     profile_id: int | None = None  # para kind='history'
-    max_age_days: int | None = 30  # período: só vídeos publicados nos últimos N dias (None = qualquer data)
+    max_age_days: int | None = None  # período (padrão: o dos parâmetros de viral em Configurações)
 
 
 @app.post("/api/research")
@@ -211,7 +233,8 @@ def research_start(body: ResearchIn):
         with db.tx() as con:
             con.execute("UPDATE research SET keywords=? WHERE id=?", (json.dumps(kws, ensure_ascii=False), rid))
     with db.tx() as con:
-        con.execute("UPDATE research SET max_age_days=? WHERE id=?", (body.max_age_days or None, rid))
+        con.execute("UPDATE research SET max_age_days=? WHERE id=?",
+                    (body.max_age_days or viral.get()["max_days"], rid))
     job = jobs.start("research", "Pesquisa de mercado", research.run, rid, body.report and ai.enabled(),
                      cancellable=True)
     return {"id": rid, "job": job.to_dict()}
@@ -225,7 +248,7 @@ def research_list(profile_id: int | None = None):
     else:
         rows = db.rows("SELECT * FROM research ORDER BY id DESC")
     for r in rows:
-        r["has_report"] = ai.cached(ai.REPORT_KIND, f"research:{r['id']}") is not None
+        r["has_report"] = ai.report_cached(r["id"])[0] is not None
         r["keywords"] = json.loads(r["keywords"] or "[]")
     return rows
 
@@ -240,17 +263,17 @@ def research_detail(rid: int):
     run = db.row("SELECT id FROM runs WHERE research_id=? ORDER BY id DESC LIMIT 1", (rid,))
     r["run_id"] = run["id"] if run else None
     videos = analytics.research_videos(rid)
+    report, report_kind = ai.report_cached(rid)
     cost = db.row("SELECT cost_usd, created_at FROM ai_results WHERE kind=? AND target=?",
-                  (ai.REPORT_KIND, f"research:{rid}"))
+                  (report_kind, f"research:{rid}"))
     return {
         "research": r,
         "videos": videos,
-        "report": ai.cached(ai.REPORT_KIND, f"research:{rid}"),
+        "report": report,
         "report_meta": cost,
         "comments": {v["video_id"]: research.top_comments(v["video_id"], 8) for v in videos if v["comments_saved"]},
         "saturation": analytics.saturation(videos) if r["kind"] == "video" else [],
         "malandro": malandro.get(r["seed"]) if r["kind"] == "video" else None,
-        "variations": ai.cached(ai.VARIATIONS_KIND, f"video:{r['seed']}") if r["kind"] == "video" else None,
         "format_labels": ai.FORMAT_LABELS,
     }
 
@@ -276,23 +299,7 @@ def research_to_discoveries(rid: int):
         raise HTTPException(404, "Pesquisa não encontrada.")
     if r["status"] == "running":
         raise HTTPException(409, "Espere a pesquisa terminar (ou cancele).")
-    old = db.row("SELECT id FROM runs WHERE research_id=?", (rid,))
-    if old:
-        return {"run_id": old["id"], "existing": True}
-    good = {v["video_id"] for v in analytics.research_videos(rid)
-            if v["potential"] and (v.get("relevance") or 2) >= 2}
-    vids = [v for v in db.rows("SELECT video_id, position FROM research_videos WHERE research_id=? ORDER BY position",
-                               (rid,)) if v["video_id"] in good]
-    if not vids:
-        raise HTTPException(400, "Essa pesquisa não tem vídeos relevantes para enviar.")
-    ts = research.now_iso()
-    with db.tx() as con:
-        run_id = con.execute(
-            "INSERT INTO runs(profile_id, started_at, finished_at, status, logged_in, videos_found, source, research_id) "
-            "VALUES(?, ?, ?, 'done', 1, ?, 'research', ?)", (r["profile_id"], ts, ts, len(vids), rid)).lastrowid
-        con.executemany("INSERT OR IGNORE INTO sightings(run_id, video_id, position, surface) VALUES(?,?,?, 'research')",
-                        [(run_id, v["video_id"], i) for i, v in enumerate(vids, 1)])
-    return {"run_id": run_id, "existing": False, "videos": len(vids)}
+    return research.send_to_discoveries(rid)
 
 
 @app.post("/api/research/{rid}/report")
@@ -330,9 +337,25 @@ def videos(profile_id: int | None = None, run_id: int | None = None, source: str
 def video_detail(video_id: str):
     """Painel de prévia: dados, canal, comentários (busca na hora se ainda não tem; 1 unidade de cota) e análise."""
     v = analytics.video_detail(video_id)
-    if not v:
-        raise HTTPException(404, "Vídeo não encontrado.")
     key = jobs.youtube_api_key()
+    if not v and key and youtube_web.parse_video_id(video_id) == video_id:
+        # Vídeo que ainda não está no banco (ex.: sugerido pelo Próximos vídeos ou citado no relatório):
+        # busca na hora pela API (números + canal) e classifica o canal.
+        try:
+            with db.tx() as con:
+                con.execute("INSERT OR IGNORE INTO videos(video_id, first_seen_at) VALUES(?, ?)", (video_id, research.now_iso()))
+            jobs.enrich(None, [video_id], key)
+            if ai.enabled():
+                jobs.classify_new_channels(video_ids=[video_id])
+        except (youtube_api.YouTubeAPIError, ai.AIError) as e:
+            print(f"[preview] buscar vídeo: {e}")
+        v = analytics.video_detail(video_id)
+        if v and not v.get("title"):   # a API não achou (vídeo removido ou privado): não deixa lixo no banco
+            with db.tx() as con:
+                con.execute("DELETE FROM videos WHERE video_id=? AND title IS NULL", (video_id,))
+            v = None
+    if not v:
+        raise HTTPException(404, "Vídeo não encontrado (pode ter sido removido ou ficado privado).")
     if not v["comments_fetched_at"] and key:
         try:
             cms = youtube_api.fetch_comments(video_id, key, 100)
@@ -345,12 +368,19 @@ def video_detail(video_id: str):
             print(f"[preview] comentários: {e}")
     v["tags"] = json.loads(v["tags"]) if v.get("tags") else []
     v["foreign"] = research.is_foreign(v)
+    # Pesquisa de parecidos (sob demanda) já feita a partir deste vídeo: a última.
+    rs = db.row("SELECT id, status, created_at, videos_found FROM research WHERE kind='video' AND seed=? "
+                "ORDER BY id DESC LIMIT 1", (video_id,))
+    if rs:
+        run = db.row("SELECT id FROM runs WHERE research_id=? ORDER BY id DESC LIMIT 1", (rs["id"],))
+        rs["run_id"] = run["id"] if run else None
+        rs["has_report"] = ai.report_cached(rs["id"])[0] is not None
     return {
         "video": v,
+        "research": rs,
         "comments": research.top_comments(video_id, 30),
         "analysis": ai.cached(ai.VIDEO_KIND, f"video:{video_id}"),
         "malandro": malandro.get(video_id),
-        "variations": ai.cached(ai.VARIATIONS_KIND, f"video:{video_id}"),
         "format_labels": ai.FORMAT_LABELS,
     }
 
@@ -373,8 +403,9 @@ def video_analyze(video_id: str, body: AnalyzeIn):
         f"Canal: {v['channel_title']} · {v['subs'] or '?'} inscritos · canal com {v['channel_age_days'] or '?'} dias "
         f"· formato: {ai.FORMAT_LABELS.get(v['channel_format'] or '', '?')} · selo IA: {'sim' if v['channel_ai'] else 'não'}",
         f"Números: {v['views'] or '?'} views · {v['likes'] or '?'} likes · {v['comments'] or '?'} comentários · "
-        f"multiplicador {v['multiplier'] or '?'}x · {v['views_day'] or '?'} views/dia · publicado há "
-        f"{round(v['age_days'] or 0)} dias · duração {round((v['duration_s'] or 0) / 60)} min · idioma {v['lang'] or '?'}",
+        f"viralizou {v['multiplier'] or '?'}x · {v.get('views_hour') or '?'} views por hora · {v['views_day'] or '?'} views/dia · "
+        f"publicado há {round(v.get('age_hours') or 0)} horas · duração {round((v['duration_s'] or 0) / 60)} min · idioma {v['lang'] or '?'}",
+        f"Régua de viral do editor: {viral.describe()} · bate a régua: {'sim' if viral.passes(v) else 'não'}",
         f"Descrição: {' '.join((v['description'] or '-').split())[:900]}",
         "Comentários mais curtidos:",
         *[f"- ({c['likes']}) {' '.join(c['text'].split())[:220]}" for c in cms],
@@ -383,6 +414,17 @@ def video_analyze(video_id: str, body: AnalyzeIn):
         return ai.analyze_video(video_id, text, research.channel_lang(), refresh=body.refresh)
     except ai.AIError as e:
         raise HTTPException(400, str(e))
+
+
+@app.post("/api/malandro/{video_id}/paises")
+def malandro_paises(video_id: str):
+    """Depois do Malandro: em que países há procura por esse conteúdo e ninguém faz (dados + IA rápida, ~US$ 0,03)."""
+    if not malandro.get(video_id):
+        raise HTTPException(400, "Rode o Método Malandro neste vídeo antes.")
+    try:
+        return jobs.start("malandro", "Malandro: países", paises.run, video_id, key=f"paises:{video_id}").to_dict()
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
 
 
 @app.get("/api/malandro/{video_id}")
@@ -402,19 +444,7 @@ def malandro_run(video_id: str):
         raise HTTPException(409, str(e))
 
 
-@app.post("/api/videos/{video_id}/variations")
-def video_variations(video_id: str, body: AnalyzeIn):
-    """Ideias de variações do título com chance de viralizar (Sonnet). Uma vez por vídeo; 'refresh' refaz."""
-    if not ai.enabled():
-        raise HTTPException(400, "IA desligada (sem chave da Anthropic).")
-    try:
-        return ai.title_variations(video_id, research.variations_payload(video_id), research.channel_lang(),
-                                   refresh=body.refresh)
-    except (ai.AIError, RuntimeError) as e:
-        raise HTTPException(400, str(e))
-
-
-# ---------------------------------------------------------------- Meu canal (o "após": modelados, DNA, mapa, próximos)
+# ---------------------------------------------------------------- Próximos vídeos (modelados, DNA, mapa e vídeos reais para modelar)
 
 class ModeledIn(BaseModel):
     profile_id: int
@@ -492,7 +522,7 @@ def next_run(body: NextIn):
     if not ai.enabled():
         raise HTTPException(400, "IA desligada (sem chave em Configurações).")
     try:
-        return jobs.start("next", "Meu canal: próximos vídeos", proximos.run, body.profile_id, body.boldness,
+        return jobs.start("next", "Próximos vídeos", proximos.run, body.profile_id, body.boldness,
                           key=f"next:{body.profile_id}", cancellable=True).to_dict()
     except RuntimeError as e:
         raise HTTPException(409, str(e))
@@ -775,6 +805,28 @@ def save_settings(body: SettingsIn):
     if body.channel_lang is not None and body.channel_lang.strip():
         db.set_setting("channel_lang", body.channel_lang.strip())
     return get_settings()
+
+
+class ViralIn(BaseModel):
+    max_days: int | None = None
+    min_views: int | None = None
+    min_vph: int | None = None
+    min_mult: float | None = None
+    max_subs: int | None = None
+    only_dark: bool | None = None
+    sort: str | None = None
+
+
+@app.get("/api/viral")
+def viral_get():
+    """Meus parâmetros de viral (a régua do app inteiro)."""
+    return {"params": viral.get(), "defaults": viral.DEFAULTS, "sorts": viral.SORTS, "text": viral.describe()}
+
+
+@app.post("/api/viral")
+def viral_save(body: ViralIn):
+    viral.save(body.model_dump())
+    return viral_get()
 
 
 @app.get("/api/ai/models")

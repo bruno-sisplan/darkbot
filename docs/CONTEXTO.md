@@ -82,11 +82,12 @@ MINHAS_CHAVES.txt       chaves do usuário para levar a outro PC (IGNORADO pelo 
 app/
   config.py             parâmetros fixos (VERSION, modelos e preços de IA, potencial, scrolls, cache...)
   ai.py                 IA (Claude ou ChatGPT): cache, custo, nicho, juiz de relevância, classificação de canais,
-                        tradução, buscas por idioma, perfil do vídeo, relatório, análise de vídeo, variações
+                        tradução, buscas por idioma, perfil do vídeo, relatório, análise de vídeo
   ai_label.py           selo "gerado por IA" do YouTube (lê a página do vídeo)
   research.py           pesquisa de mercado (descoberta em camadas, período, comentários, relatório)
   malandro.py           Método Malandro (em que línguas ninguém fez o vídeo)
-  proximos.py           Meu canal: vídeos modelados, DNA do canal, mapa de território, próximos vídeos, fila
+  proximos.py           Próximos vídeos: modelados, DNA do canal, mapa de território, vídeos reais para modelar, fila
+  viral.py              Meus parâmetros de viral (Configurações): a régua do app inteiro
   youtube_web.py        páginas públicas do YouTube sem navegador (sugeridos, busca)
   paths.py              pastas de dados (%LOCALAPPDATA%\darkbot, ou DARKBOT_HOME) e da interface (compatível com PyInstaller)
   db.py                 SQLite: schema, helpers rows/row/tx, settings
@@ -196,7 +197,7 @@ O teste real foi feito em 30/09/2026 com o perfil "Tecnologia": a cópia do Chro
 
 ## 9. Onde paramos e próximos passos (em ordem)
 
-**Última coisa feita (01/10/2026):** aba Meu canal (ver o item no fim desta seção). Antes disso: .exe gerado e testado (`tools/build_exe.py`, ver o item ".exe para distribuir"), perfil deslogado testado, tudo commitado (`34b72d3`), `COMO_GERAR_VERSAO.txt` criado e `MINHAS_CHAVES.txt` (ignorado pelo git) para o usuário levar as chaves a outro PC. Os itens abaixo estão em ordem cronológica: cada bloco em negrito é um recurso, com o porquê e os detalhes técnicos.
+**Última coisa feita (01/10/2026):** reorganização do app em Descobrir + Próximos vídeos, com os parâmetros de viral (ver o último item desta seção). Antes: aba Meu canal. Antes disso: .exe gerado e testado (`tools/build_exe.py`, ver o item ".exe para distribuir"), perfil deslogado testado, tudo commitado (`34b72d3`), `COMO_GERAR_VERSAO.txt` criado e `MINHAS_CHAVES.txt` (ignorado pelo git) para o usuário levar as chaves a outro PC. Os itens abaixo estão em ordem cronológica: cada bloco em negrito é um recurso, com o porquê e os detalhes técnicos.
 
 **Primeiros ajustes (30/09/2026):** ambiente montado na segunda máquina (venv com Python 3.13, demo gerada), **shorts removidos de tudo**, importação sem precisar fechar o Chrome (só o perfil escolhido não pode estar aberto) e correção do `darkbot.bat`: com `pythonw` o stdout é None, o log do uvicorn quebrava e o app fechava em silêncio. Agora, sem console, a saída vai para `%LOCALAPPDATA%\darkbot\darkbot.log`.
 
@@ -316,6 +317,205 @@ Descobertas. Pediu "bola algo interessante": entraram o **DNA do canal**, o **ma
   (teto de tokens pequeno). Teto aumentado (só se paga o que a IA escreve).
 - Também em 01/10/2026: decidido **sem Supabase** (banco local, um por cliente); gerador de título/descrição/tags
   começado e **desfeito a pedido do usuário** ("não precisa montar títulos ainda").
+
+**Reorganização: Descobrir + Próximos vídeos + parâmetros de viral (01/10/2026):** o usuário achou o app "muito
+bagunçado": pesquisa em vários lugares, uma tela levando para outra. Pediu para enxugar e centralizar: Descobrir (o lado
+do Método Malandro, achar o que modelar) separado de Próximos vídeos (o que modelar em seguida). **Próximo vídeo NÃO pode
+ser título sugerido pela IA ("achismo")**: tem que ser vídeo REAL que já está provando, com bons números. E os
+parâmetros de viral ficam em Configurações, porque os tops de verdade têm 1 a 3 dias e muitas views, e o app trazia
+vídeos de meses e anos. Escolhas dele: menu "Descobrir + Próximos"; tirar TODOS os títulos da IA; padrão "esta semana,
+3 a 5 mil views ou mais, do mais top para o pior".
+- **`app/viral.py`** (a régua única do app): `max_days` 7, `min_views` 3000, `min_vph`, `min_mult`, `max_subs`,
+  `only_dark`, `sort` (padrão **views por hora**: o que explode AGORA). Fica em `settings.viral_params`; rotas
+  `GET/POST /api/viral`. `add_metrics` calcula `age_hours` e `views_hour`; `passes`, `rank`, `upload_filter` (filtro de
+  data da busca do YouTube que cobre o período) e `describe` (texto simples, vai para a tela e para a IA). A interface
+  tem a mesma conta em `passesViral` (app.js). `analytics.opportunity` (o "score") agora é o valor da ordem escolhida.
+- **Motor de busca:** todas as buscas da pesquisa usam o período dos parâmetros (`research.search_plan`: top por views,
+  "hoje" por views quando o período é ≤ 7 dias, recentes e relevância, tudo com filtro de data). Teste: a busca de
+  relevância sem data trazia vídeos de 1 a 15 anos; com "esta semana" só volta o que tem dias.
+- **Menu:** Descobrir (abas Viralizando agora / Pesquisas / Canais / Títulos), Próximos vídeos, Perfis, Configurações.
+  "Pesquisa IA", "Meu canal" e "Transcrições EM BREVE" saíram do menu. O topo do Descobrir (`#disc-head`: barra de
+  pesquisa, parâmetros, abas) é um só e o JS o leva para a aba aberta (`go()`). A barra aceita **link** (pesquisa a
+  partir do vídeo) ou **assunto** (palavras-chave); o modal de nova pesquisa e o seletor de período saíram. Pesquisa
+  pelo histórico do perfil: botão na aba Pesquisas.
+- **Pesquisa cai sozinha em Viralizando agora** (`research.send_to_discoveries`, no fim de `run()`): sem botão
+  "Enviar". Pesquisas antigas têm "Levar para Viralizando agora".
+- **Viralizando agora:** "Só o que viraliza agora" (parâmetros) ou "Tudo"; coluna **Views por hora**, ordem dos
+  parâmetros. Os filtros de idade, inscritos, idade do canal e multiplicador saíram (os parâmetros fazem isso). A lupa
+  das linhas saiu ("Achar parecidos" fica na prévia). "Recente" = até 2 dias.
+- **Sem título da IA:** saíram as ideias de variações (rota, `ai.title_variations`, prévia e pesquisa), os modelos de
+  título e as ideias prontas do relatório (`report:v2`: "Modele estes agora" com 8 vídeos reais) e os títulos da
+  análise de vídeo (`analysis:v2`). A coluna "Nota" saiu (virou views por hora).
+- **Próximos vídeos** (`next:v3`): candidatos = o que já viraliza em Descobrir (até 40, `HOT_FROM_DISCOVER`) + buscas
+  novas no período dos parâmetros → juiz do nicho → números → só o que bate os parâmetros, na ordem deles → a IA
+  **escolhe vídeos da tabela** (`picks`: n, tipo, território, motivo), não escreve título. Cada item é o vídeo real
+  (thumb, views por hora, views, viralizou, idade) com Prévia, + Vou fazer (com `video_id`) e Já modelei. Rodadas
+  antigas (sem `version: 3`) pedem para rodar de novo. Antes, a rodada EXCLUÍA tudo que estava em Descobertas; agora usa.
+- Cuidado achado no caminho: `app/research.py` tinha uma f-string com `\"` que quebra no Python 3.11 (o .venv é 3.13).
+  Corrigido.
+- Testado numa cópia do banco, porta 8766: telas sem erro de JS, `/api/viral`, 11 de 178 vídeos batem o padrão,
+  o Próximos acha 11 candidatos em Descobrir. A rodada completa do Próximos com IA ainda não foi rodada (custa ~US$ 0,05).
+
+**Refino dos agentes de pesquisa (01/10/2026):** o usuário pediu para revisar o código e refinar os agentes e prompts
+de pesquisa, "muito profissional".
+- **Pré-filtro antes da IA** (`research._discover`, `prefilter` + `judge`): todo candidato tem data e duração lidas
+  pela API (1 unidade a cada 50 vídeos) ANTES do juiz. Short, removido e fora do período saem sem gastar IA (sairiam
+  no fim de qualquer jeito, em `_apply_period`). Teste: nas camadas de sugeridos só 53 de 125 e 48 de 114 foram julgados.
+  Os números ficam num cache (`meta`) reaproveitado para achar os canais concorrentes.
+- **Juiz `rel:v3`:** vê título + canal + duração (não só o título) e tem regras explícitas: canal de pessoa (react,
+  cortes, podcast, telejornal) no máximo 2; música, clipe, trailer, live e vídeo de 1 min = 0. `judge_relevance`
+  aceita `(id, título)` ou `(id, título, "canal | duração")`.
+- **Briefing para pesquisa por assunto e por histórico** (`ai.research_brief`, `brief:v1`, Haiku): tema, formato,
+  premissa, critério do juiz, 6 buscas como o público digita e 6 títulos-sonda de busca. Antes, a pesquisa por assunto
+  só repetia o que o editor digitou. As buscas do editor vêm primeiro. Salvo em `research.topic` (a tela mostra
+  Assunto / Tipo / Premissa). `history_keywords` e `search_keywords` saíram.
+- **Semente `seed:v2`:** "angle" virou PREMISSA (o que se repete nos modelados); variações em vários eixos, com papéis
+  invertidos. **Buscas por idioma `qtrans:v2`:** intenção do público local, não tradução.
+- **Relatório `report:v3`:** régua de viral do editor (views por hora) no lugar de "30 a 90 dias"; evidência obrigatória
+  (ID + número); proibido conselho genérico; sinal forte/fraco explicado; nova seção **Brechas** (`gaps`, aparece ao
+  lado de "O que está funcionando"); "Modele estes agora" prioriza views por hora, concorrente direto, canal dark e
+  pequeno. Relatórios `report:v2` continuam aparecendo (`ai.report_cached`). O payload avisa a IA quando nada bate a
+  régua.
+- **Análise de vídeo:** recebe a régua e se o vídeo bate, views por hora e idade em horas; regras de evidência e sem
+  conselho genérico (mesmo `analysis:v2`, só o prompt mudou).
+- **Próximos:** `next-plan:v3` (buscas com o vocabulário dos títulos que viralizam); escolha prioriza views por hora,
+  depois facilidade de replicar (canal pequeno/dark), depois o DNA; no máximo 2 vídeos com a mesma premissa.
+- Comentários lidos: primeiro dos vídeos que batem a régua.
+- Teste real (cópia do banco, porta 8766, "engenheiros desmontam carro chinês", PT + EN, com relatório): 85 vídeos,
+  47 concorrentes diretos, todos com até 7 dias; no padrão da tela (mesmo assunto + só dark) 44 vídeos, todos canais
+  de narração, em 4 idiomas. Custo total ~US$ 0,10 (relatório US$ 0,057, juiz US$ 0,027, briefing US$ 0,003).
+
+**Garimpo no perfil + "Ritmo agora" (01/10/2026):**
+- **Bug "Ganhou por dia" maior que o total de views** (ex.: +6,5 mil num vídeo com 4,6 mil): `_growth` usava
+  `_age_days`, que arredonda tudo abaixo de 6 horas para 6 horas e encolhia o intervalo entre as coletas. Agora usa as
+  horas reais (`viral.hours_since`, mínimo 1 h entre medições) e virou **"Ritmo agora"** (`growth_hour`, views por hora
+  entre as duas últimas coletas): comparado com Views por hora (média desde a postagem) mostra se está ACELERANDO (↑ verde).
+- **O usuário explicou como ele garimpa à mão** (o modelo do agente): abre um vídeo dark do nicho (ou pesquisa o tema ou
+  um título) num perfil, vai nos sugeridos, abre os que são DARK e do MESMO NICHO (não precisa ser o mesmo assunto),
+  deixa rodando para aquecer, entra nos canais e assiste também (mesmo fora dos parâmetros: serve para afunilar o
+  perfil), e repete. Reclamou que o Descobrir estava fundo demais e deixava oportunidades boas para trás.
+- **`app/garimpo.py`** (botão "Garimpar no perfil" ao lado de Pesquisar; `POST /api/profiles/{id}/garimpo`, job com a
+  chave do perfil): Chrome do perfil com Playwright (fora da tela, `--mute-audio`, autoplay liberado). Partida = vídeo
+  do link ou busca no YouTube DO PERFIL. Cada rodada: abre os escolhidos em abas (play em cada, `bring_to_front`),
+  lê os sugeridos do `ytInitialData` da página (os do perfil, personalizados), deixa rodando N segundos. Escolha:
+  API (duração, sem short) → juiz `rel:v3` com critério de NICHO (nota ≥ 2 = mesmo nicho, outro assunto vale) →
+  `enrich` + classificação do canal → só dark. Próxima rodada: os melhores, no máximo 1 por canal. Visita os canais
+  mais fortes (página do canal + assiste os mais vistos dos últimos 15 uploads, mesmo fora dos parâmetros). Se os
+  sugeridos secam (perfil frio), pesquisa no perfil as buscas e títulos do briefing. No fim: selo de IA e coleta da
+  home (já aquecida). Tudo vira uma coleta `runs.source='garimpo'` (filtro "Garimpo no perfil" e marcação "Garimpo"
+  em Descobrir). Modos: rápido (2 rodadas × 3, 45 s), normal (3 × 4, 75 s, 1 canal), profundo (5 × 5, 90 s, 2 canais).
+- **Pesquisa → Descobrir mais abrangente:** `send_to_discoveries` manda também a nota 1 (mesma área, outro tema); os
+  parâmetros e o "só dark" filtram lá.
+- Teste (perfil descartável, frio e deslogado, só na cópia do banco; modo rápido a partir de "Engenheiros Alemães
+  Desmontaram uma Bateria da BYD"): 1º teste achou só 7 (sugeridos de perfil frio são genéricos) → entrou a pesquisa
+  no perfil quando os sugeridos secam → 2º teste: 10 achados todos no nicho (inclui um de 1,4 mi de views com 11 dias),
+  3,5 min, home coletada. Custo de IA ~US$ 0,02.
+
+**Enxugar: uma tela de Descobrir, pesquisa e relatório sob demanda (01/10/2026):** o usuário pediu menos informação:
+o que importa são os dados do vídeo e o Método Malandro.
+- Saíram da tela as abas **Canais, Títulos e Pesquisas** (e as páginas e o JS delas). Os canais continuam no banco
+  (classificação dark, análise dos vídeos). Descobrir virou uma página só (`go()` sem abas). A pesquisa pelo histórico
+  do perfil ficou só no backend (o garimpo cobre isso).
+- **Pesquisa sem relatório automático:** a interface sempre manda `report: false`; sem relatório a pesquisa também
+  não lê comentários (`_fetch_comments` só com relatório; `report_job` lê os comentários antes de escrever). Ao terminar,
+  a lista mostra só o que ela achou (filtro Coleta) e o toast explica como voltar.
+- **Prévia do vídeo enxuta:** marcação "Viralizando agora / Fora dos seus parâmetros"; 6 números (views por hora,
+  ritmo agora, viralizou, views, postado há, duração); ações; o canal numa linha com É dark / Não é; **Método Malandro**;
+  **Vídeos parecidos** (sob demanda: "Achar parecidos" ~US$ 0,04; depois "Ver na lista", "Relatório do nicho" e
+  "procurar de novo"; o servidor devolve `research` na rota do vídeo); Análise com IA; e "Mais detalhes" recolhido
+  (curtidas, comentários, descrição, tags, sobre o canal).
+- **Relatório do nicho no painel da direita** (`openReport`, `PV.report`): pedido na prévia ou em Coletas (botão
+  "Relatório" nas pesquisas), com "← voltar ao vídeo". `watchJob(j, onDone)` reabre o relatório quando fica pronto.
+
+**Tela de Perfis mais clara (01/10/2026):** o usuário achou confusa (a tabela "Últimas coletas" misturava perfis e
+pesquisas, com colunas desalinhadas). A tabela saiu (o histórico fica em Descobrir → Coletas). Cada cartão mostra:
+"Em uso" (ou "Usar este"), vídeos / coletas (só home, histórico e garimpo) / última, a **última atividade numa linha**
+(o que foi, quando, quantos vídeos ou o erro) e só as ações principais (**Coletar a home**, **Garimpar**); o resto
+(rolar, mostrar o Chrome, entrar na conta, abrir o Chrome no nicho, coletar o que assistiu) fica em "Mais opções".
+O garimpo pode ser aberto de qualquer cartão (`openGarimpo(pid)`); em perfil **coringa ou sem nicho o ponto de partida
+é obrigatório** (o usuário garimpou o perfil coringa com o nicho "conteúdo variado multitemas" como busca e deu erro).
+
+**Prévia de vídeo que não está no banco (01/10/2026):** "Vídeo não encontrado" ao clicar em Prévia no Próximos vídeos:
+os vídeos da rodada vêm da API e não eram gravados. Agora `GET /api/videos/{id}` busca na hora o que falta (insere,
+`enrich` = números + canal, classifica o canal) e só dá 404 se a API também não achar (removido/privado), sem deixar
+linha vazia no banco. Vale para qualquer vídeo citado (relatório, mapa de território, etc.).
+
+**Motor de busca: mais abrangente, medido (01/10/2026):** o usuário pediu para refinar o motor e frisou: "refinar é
+melhorar, não afunilar". Feito com medição (`tools/bench_pesquisa.py`: roda pesquisas reais num servidor de teste com
+uma cópia do banco e conta as **oportunidades** = do nicho + canal dark + dentro dos parâmetros; antes/depois a partir
+da MESMA cópia do banco).
+- **Paginação sem cota** (`youtube_web._paginate`, o "carregar mais" do site via `/youtubei/v1/search` e `/next`, com a
+  versão do cliente e a chave interna lidas da 1ª página): busca 20 → 60 vídeos, sugeridos 26 → 77. Pesquisa: buscas por
+  views 3 páginas, por data/relevância 2, outros idiomas 2, sugeridos da semente 3, das camadas 2. Próximos: 2.
+- **Buscas aprendidas (bola de neve)** (`ai.learn_queries`, `learn:v1`, Haiku, ~US$ 0,003): depois da 1ª camada, os 30
+  relevantes que mais ganham views por hora ensinam até 8 buscas novas (em qualquer idioma escolhido), rodadas por views
+  e relevância no período. Ficam em `research.keywords`.
+- **Camadas pelos que mais viralizam:** os sugeridos abertos primeiro são os dos vídeos com mais views por hora, e cada
+  um é aberto como visitante do país/idioma DO VÍDEO (o mercado dele). 12 por camada.
+- **Concorrentes:** 15 canais (antes 8), 30 uploads cada; peso maior para concorrente direto e para vídeo explodindo.
+- **Juiz em dois níveis** (`research._judge_topic`): nota 3 = a premissa; nota 2 = **qualquer vídeo do mesmo nicho que o
+  mesmo público assiste**. O critério anterior (do refino de prompts) dizia para "excluir o que só divide o tema" e
+  afunilava: a pesquisa a partir de vídeo piorou com ele.
+- **Sem desperdício:** não julga vídeo bem abaixo do mínimo de views e sem ritmo (< 30% do mínimo e < 30 views/h), nem de
+  canal que já se sabe não dark (com "só dark"); só classifica canais de vídeos que podem virar oportunidade.
+- Medição (mesma cópia do banco, idiomas PT+EN+ES, sem relatório):
+
+  | pesquisa | oportunidades | canais | views/h somadas | custo | tempo |
+  |---|---|---|---|---|---|
+  | vídeo do trator chinês, antes | 16 | 12 | 8,5 mil | US$ 0,034 | 45 s |
+  | vídeo do trator chinês, depois | 23 a 25 | 12 a 18 | 5,9 a 6,9 mil | US$ 0,05 a 0,06 | 70 s |
+  | "histórias de terror reais", antes | 84 | 58 | 69 mil | US$ 0,09 | 58 s |
+  | "histórias de terror reais", depois | 229 a 240 | 161 a 164 | 310 a 350 mil | US$ 0,22 | 110 s |
+
+  Custo por oportunidade igual ou menor; o custo total sobe porque julga muito mais vídeos (o juiz é ~75% do custo).
+  Se o usuário achar caro: diminuir páginas (`SEARCH_PAGES`, `RELATED_PAGES`) ou criar uma opção "pesquisa rápida".
+
+**Método Malandro + países: procura x oferta (01/10/2026):** o usuário pediu um adicional ao Malandro: depois de rodar
+100%, descobrir "quais países se interessariam nesse conteúdo a partir de dados, buscas, pesquisas, e não têm esse
+conteúdo". O Malandro já dá a OFERTA por idioma; `app/paises.py` mede a PROCURA (botão "Ver países com procura e sem
+oferta" dentro do Malandro na prévia; `POST /api/malandro/{id}/paises`; resultado em `malandro.result["paises"]`):
+- 24 países em 13 idiomas (`COUNTRIES`; um idioma vale para vários países). A IA (`paises-termos:v2`) escreve 3 termos
+  MUITO curtos do tema por idioma (o autocompletar só funciona com o começo do que muita gente digita; termos de 3
+  palavras voltaram vazios no teste).
+- **Buscas (por país):** autocompletar da busca do YouTube (`youtube_web.suggest`, suggestqueries com `ds=yt`, `hl`/`gl`
+  do país; sem sugestão, encurta o termo). Mostra o que cada país digita ("trator chinês no brasil", "tractor chino en
+  argentina"). Teto de 10 por termo (30 no total).
+- **Vídeos do tema (por idioma):** busca dos 2 primeiros termos, mais vistos do último mês, 2 páginas. Só contam vídeos
+  DAQUELE idioma (`_in_lang`: língua da API ou alfabeto do título; a busca em hindi devolvia vídeos em inglês), sem os
+  "feitos para crianças" (`youtube_api.fetch_videos` agora lê `status.madeForKids` como `kids`, mesma cota) e só os do
+  NICHO pelo juiz de relevância (termos amplos puxavam desenho infantil: "Trator Azul", Disney Junior).
+- Procura 0-1 relativa aos outros mercados (40% views/h típicas, 35% vídeos com tração ≥ 30/h, 25% autocompletar);
+  oportunidade = procura × oferta (livre 1, pouca 0,6, saturada 0,25). A IA (`paises:v2`, rápido) só escreve o resumo,
+  o porquê e o que adaptar (moeda, marcas, rival local) dos 8 melhores mercados e o que aparece nos comentários.
+- Tela: cartões por MERCADO (idioma) com os países e as buscas de cada um, procura, oferta, "Buscam em…", título pronto
+  do Malandro e o vídeo do tema mais forte lá; "Ver todos os idiomas".
+- Teste (vídeo do trator chinês desmontado): ~30 s, US$ 0,03. Sem os filtros, Hindi aparecia em 1º (eram vídeos de
+  trator agrícola indiano, fora do nicho); com os filtros: Italiano, Russo e Espanhol com procura e ninguém fez; Inglês
+  com mais procura, mas 2 canais já fizeram.
+
+**Países: correções depois do teste do usuário (01/10/2026):** com um vídeo em espanhol ("Miles de menonitas están
+abandonando México") a tela dizia "Espanhol: ninguém fez, procura alta, 1º lugar", Indonésio e Italiano apareciam como
+oportunidades com procura baixa e 0 vídeos, e as buscas eram lixo ("abandono en la mansión del duque"). Causas e correções:
+- O Malandro ignorava o próprio vídeo ao contar a oferta: o idioma do original saía "livre". Agora conta +1 canal
+  (`malandro._fix_original`, que também corrige os resultados já guardados ao ler) e, em Países, o idioma do original
+  não entra no ranking (aviso "já existe lá") e o próprio vídeo não conta como procura.
+- A procura era RELATIVA (o menos fraco virava "alta"). Agora é absoluta: 55% views/h típicas (teto 1.000/h, escala log)
+  + 45% vídeos do nicho com tração (teto 15); alta ≥ 0,6, média ≥ 0,35. Só mercados com procura média ou alta viram
+  cartão; sem nenhum, o resumo diz que o tema só tem procura no idioma original.
+- O autocompletar saiu da nota (qualquer palavra comum enche as sugestões): só mostra o que se busca. Os termos agora
+  começam sempre pelo nome específico do assunto ("menonitas", "menonitas méxico", "amish"), nunca por palavra genérica
+  (`paises-termos:v3`). A IA não cita a nota 0-1 (`paises:v3`).
+- Reteste com o mesmo vídeo: Espanhol = idioma do original; Inglês = muitos já fizeram (4 canais); Alemão = única
+  oportunidade (buscam "mennoniten doku", "mennoniten paraguay"; menonitas são de origem alemã); o resto sem procura.
+
+**Garimpo e anúncios (01/10/2026):** o usuário viu o garimpo "assistindo os anúncios" e perguntou se isso mexe no
+algoritmo do perfil. Anúncio não entra no histórico nem treina as recomendações (só a personalização de anúncios); o
+problema era o TEMPO: os segundos de anúncio contavam como "assistido" e o vídeo do nicho rodava menos. Agora `_watch`
+acompanha o player a cada 2 s (`_TICK`: classe `ad-showing`/`ad-interrupting` do `#movie_player`) e só conta segundos de
+VÍDEO; o botão "Pular" é clicado com clique real do Playwright quando fica visível (o clique por JS era ignorado pelo
+YouTube: no 1º teste o botão ficou na tela o tempo todo). Anúncio não pulável roda até o fim (não mexemos nele), com
+até 120 s a mais de espera por rodada (`WATCH_EXTRA_S`). O fim do garimpo diz quantos anúncios apareceram e foram pulados.
+Teste: 4 vídeos juntos, meta 30 s: 3 anúncios, 3 pulados, 45 s no total.
 
 **Pendente com o usuário:**
 - Mandar o .exe para o colega e ver se funciona no PC dele (o `.exe` atual foi gerado ANTES da mensagem nova de "home vazia": gerar de novo antes de mandar).

@@ -65,7 +65,7 @@ def _fetch_items(path: str, part: str, ids, key: str) -> list[dict]:
 
 def fetch_videos(ids, key: str) -> list[dict]:
     out = []
-    for it in _fetch_items("videos", "snippet,statistics,contentDetails", ids, key):
+    for it in _fetch_items("videos", "snippet,statistics,contentDetails,status", ids, key):   # mesma cota
         sn, st = it.get("snippet", {}), it.get("statistics", {})
         out.append({
             "video_id": it["id"],
@@ -80,6 +80,7 @@ def fetch_videos(ids, key: str) -> list[dict]:
             "comments": _int(st.get("commentCount")),
             "description": (sn.get("description") or "")[:2000],
             "tags": sn.get("tags") or [],
+            "kids": bool(it.get("status", {}).get("madeForKids")),   # "feito para crianças" (desenho, infantil)
         })
     return out
 

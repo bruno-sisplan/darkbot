@@ -17,9 +17,24 @@ SATURATED_CHANNELS = 3           # a partir de quantos canais a língua está sa
 SHOW_PER_LANG = 6                # vídeos guardados por língua (os melhores)
 
 
+def _status(channels: int) -> str:
+    return "livre" if channels == 0 else "saturada" if channels >= SATURATED_CHANNELS else "pouca"
+
+
+def _fix_original(res: dict) -> dict:
+    """O idioma do vídeo original já tem o próprio vídeo: conta como 1 canal (nunca "ninguém fez").
+    Corrige também os resultados guardados antes desta regra."""
+    for l in res.get("langs", []):
+        if l.get("original") and l.get("status") == "livre":
+            l["channels"] = max(1, l.get("channels") or 0)
+            l["status"] = _status(l["channels"])
+    res["free"] = [l["code"] for l in res.get("langs", []) if l["status"] == "livre"]
+    return res
+
+
 def get(video_id: str) -> dict | None:
     r = db.row("SELECT result FROM malandro WHERE video_id=?", (video_id,))
-    return json.loads(r["result"]) if r else None
+    return _fix_original(json.loads(r["result"])) if r else None
 
 
 # Línguas com alfabeto próprio: se o título não tem esse alfabeto, não é dessa língua (a IA às vezes erra).
@@ -112,8 +127,8 @@ def run(job: jobs.Job, video_id: str) -> dict:
     for lang in LANGS:
         direct = [c for c in cards if c["lang"] == lang and c["relevance"] >= 3]
         theme = [c for c in cards if c["lang"] == lang and c["relevance"] == 2]
-        channels = len({c["channel_id"] for c in direct})
-        status = "livre" if channels == 0 else "saturada" if channels >= SATURATED_CHANNELS else "pouca"
+        channels = len({c["channel_id"] for c in direct}) + (1 if lang == seed_lang else 0)   # + o próprio original
+        status = _status(channels)
         best = sorted(direct + theme, key=lambda c: -(c["multiplier"] or 0))[:SHOW_PER_LANG]
         langs_out.append({
             "code": lang, "name": ai.LANGUAGES[lang][2], "status": status, "direct": len(direct),

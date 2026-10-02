@@ -340,38 +340,39 @@ def detect_niche(target: str, titles: list[str], refresh: bool = False) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Palavras-chave de pesquisa a partir de um vídeo de referência
+# Briefing da pesquisa por assunto ou pelo histórico (o equivalente ao perfil da semente)
 # ---------------------------------------------------------------------------
 
-KEYWORDS_KIND = "keywords:v1"
-
-_KEYWORDS_SYSTEM = """Você é pesquisador de mercado para canais dark do YouTube (sem rosto, narração, imagens ou IA).
-A partir de um vídeo de referência, escreva as buscas que um pesquisador digitaria no YouTube para achar
-vídeos do MESMO nicho e do MESMO formato (concorrentes diretos que dá para modelar).
-
-- queries: 4 buscas curtas (2 a 5 palavras), no idioma do título, variando o ângulo (tema central,
-  subtema, formato do vídeo, termo que o público usa). Nada de nomes de canal."""
-
-
-class Queries(BaseModel):
+class Queries(BaseModel):   # resposta mínima (usada no teste dos modelos)
     queries: list[str]
 
 
-def history_keywords(target: str, titles: list[str]) -> list[str]:
-    """Buscas a partir dos vídeos que o perfil assistiu (o centro de interesse do editor)."""
-    user = "Vídeos assistidos recentemente (os do topo são os mais recentes):\n" + "\n".join(
-        f"- {t}" for t in titles[:40])
-    res = _run(KEYWORDS_KIND, target, config.AI_MODEL_FAST, _KEYWORDS_SYSTEM.replace(
-        "A partir de um vídeo de referência", "A partir dos vídeos que o editor assistiu (ache o centro do nicho)"),
-        user, Queries, max_tokens=200)
-    return [q.strip() for q in res["queries"] if q.strip()][:4]
+BRIEF_KIND = "brief:v1"
+
+_BRIEF_SYSTEM = """Você é um pesquisador de mercado sênior de canais dark do YouTube (sem rosto: narração com voz de IA
+ou locutor sobre imagens de IA, banco de vídeos ou animação). O editor quer achar o que está VIRALIZANDO AGORA {source}.
+Monte o briefing da pesquisa:
+- theme: o tema central em poucas palavras, em português.
+- format: o formato que mais funciona para canais dark nesse tema (ex.: "história real narrada com imagens de IA",
+  "documentário de engenharia narrado", "lista de curiosidades com banco de vídeos").
+- angle: o gancho que mais puxa views nesse tema (ex.: "rivalidade entre países + revelação técnica").
+- topic: 1 a 2 frases em português dizendo exatamente que vídeo conta como concorrente (tema + formato + premissa).
+  É o critério do filtro de relevância: específico o bastante para cortar ruído, amplo o bastante para pegar os
+  subtemas que o mesmo público assiste.
+- queries: 6 buscas curtas (2 a 6 palavras) em {lang}, como o PÚBLICO digita no YouTube: 2 do tema central, 2 com o
+  vocabulário do público (termos populares, não técnicos) e 2 de subtemas em alta nesse nicho. Sem nome de canal,
+  sem aspas, sem hashtags.
+- variants: 6 títulos no estilo exato dos vídeos que viralizam nesse tema, em {lang}. São SÓ sondas de busca (achar
+  concorrentes pelo jeito de titular): variem a premissa e os detalhes (país, objeto, pessoa, número, época)."""
 
 
-def search_keywords(video_id: str, title: str, channel: str) -> list[str]:
-    user = f"Título: {title}\nCanal: {channel}"
-    res = _run(KEYWORDS_KIND, f"video:{video_id}", config.AI_MODEL_FAST, _KEYWORDS_SYSTEM, user, Queries,
-               max_tokens=200)
-    return [q.strip() for q in res["queries"] if q.strip()][:4]
+def research_brief(target: str, source: str, text: str, lang: str) -> dict:
+    """Briefing de uma pesquisa por assunto (source = o que o editor escreveu) ou pelo histórico (títulos assistidos)."""
+    system = _BRIEF_SYSTEM.format(
+        source="sobre o assunto que ele escreveu" if source == "keyword" else
+        "no nicho dos vídeos que o perfil dele assistiu (ache o CENTRO do nicho, ignore os vídeos fora da curva)",
+        lang=lang)
+    return _run(BRIEF_KIND, target, config.AI_MODEL_FAST, system, text, SeedProfile, max_tokens=900)
 
 
 # ---------------------------------------------------------------------------
@@ -512,9 +513,10 @@ LANGUAGES = {  # código: (hl, gl, nome)
     "it": ("it", "IT", "Italiano"),
 }
 
-_QTRANS_SYSTEM = """Você adapta buscas do YouTube para outros idiomas. Para cada idioma pedido, escreva como um
-nativo PESQUISARIA esse mesmo assunto no YouTube (não é tradução literal: use o termo que o público daquele país usa).
-Buscas curtas, de 2 a 5 palavras."""
+_QTRANS_SYSTEM = """Você adapta buscas e títulos do YouTube para outros mercados. Para cada idioma pedido, reescreva
+cada item como um NATIVO daquele país digitaria para achar o MESMO tipo de vídeo: mesma intenção, termos e ordem de
+palavras naturais do público local (não é tradução literal). Mantenha em inglês só o que o público local já usa em
+inglês (marcas, nomes próprios). Itens curtos, de 2 a 6 palavras, sem aspas. Use o código do idioma como recebido."""
 
 
 class LangQueries(BaseModel):
@@ -533,30 +535,76 @@ def localize_queries(queries: list[str], langs: list[str]) -> dict[str, list[str
     user = "Buscas:\n" + "\n".join(f"- {q}" for q in queries) + "\n\nIdiomas: " + ", ".join(
         f"{l} ({LANGUAGES[l][2]})" for l in langs)
     target = hashlib.sha1(user.encode()).hexdigest()[:16]
-    res = _run("qtrans:v1", target, config.AI_MODEL_FAST, _QTRANS_SYSTEM, user, LangQueryList,
+    res = _run("qtrans:v2", target, config.AI_MODEL_FAST, _QTRANS_SYSTEM, user, LangQueryList,
                max_tokens=80 * len(langs) * max(len(queries), 1) + 200)
     return {i["lang"]: [q for q in i["queries"] if q.strip()] for i in res["items"] if i["lang"] in langs}
+
+
+# ---------------------------------------------------------------------------
+# Buscas aprendidas: o que está viralizando ensina o que buscar a seguir (bola de neve)
+# ---------------------------------------------------------------------------
+
+_LEARN_SYSTEM = """Você é um pesquisador de mercado sênior de canais dark do YouTube. Recebe o que o editor procura, as
+buscas que já foram feitas e títulos de vídeos do nicho que estão VIRALIZANDO AGORA (com idioma e views por hora).
+Faça o que um bom pesquisador faz ao ver o que está funcionando: pesquise MAIS disso, abrindo o leque.
+
+- items: até {n} buscas NOVAS, de 2 a 6 palavras, cada uma no idioma do público que ela deve achar (lang = um destes
+  códigos: {langs}). Tire dos títulos os termos, premissas, personagens, lugares, objetos e formatos que se repetem
+  nos que mais ganham views por hora e que AINDA NÃO foram buscados. Misture: premissas concretas que estão
+  funcionando, subtemas vizinhos que o mesmo público assiste e o jeito como o público escreve. Não repita nem
+  reformule as buscas já feitas. Sem nome de canal, sem aspas, sem hashtag."""
+
+
+class LangQ(BaseModel):
+    lang: str
+    q: str
+
+
+class LangQList(BaseModel):
+    items: list[LangQ]
+
+
+def learn_queries(topic: str, done: list[str], titles: list[tuple[str, str, int]], langs: list[str],
+                  n: int = 8) -> list[tuple[str, str]]:
+    """titles: [(idioma, título, views por hora)] dos relevantes que viralizam -> [(idioma, busca)] novas."""
+    langs = [l for l in langs if l in LANGUAGES] or ["pt"]
+    system = _LEARN_SYSTEM.format(n=n, langs=", ".join(langs))
+    user = "\n".join([f"O editor procura: {topic}", "", "Buscas já feitas: " + "; ".join(done[:40]), "",
+                      "Viralizando agora (idioma | views por hora | título):"]
+                     + [f"- {l} | {vph} | {' '.join(t.split())[:110]}" for l, t, vph in titles[:30]])
+    target = hashlib.sha1((system + user).encode()).hexdigest()[:20]
+    res = _run("learn:v1", target, config.AI_MODEL_FAST, system, user, LangQList, max_tokens=40 * n + 200)
+    seen = {d.lower() for d in done}
+    out = []
+    for it in res["items"]:
+        q = " ".join(it["q"].split()).strip("\"'")
+        if it["lang"] in langs and q and q.lower() not in seen:
+            seen.add(q.lower())
+            out.append((it["lang"], q))
+    return out[:n]
 
 
 # ---------------------------------------------------------------------------
 # Perfil do vídeo-semente: tema, ângulo e variações do título (Haiku)
 # ---------------------------------------------------------------------------
 
-SEED_KIND = "seed:v1"
+SEED_KIND = "seed:v2"
 
-_SEED_SYSTEM = """Você é um pesquisador de mercado de canais dark do YouTube. Recebe um vídeo de referência que o editor
-quer MODELAR e prepara a pesquisa de concorrentes diretos.
+_SEED_SYSTEM = """Você é um pesquisador de mercado sênior de canais dark do YouTube. Recebe um vídeo de referência que o
+editor quer MODELAR e prepara a caça aos concorrentes diretos (outros canais que fizeram o mesmo vídeo trocando detalhes).
 
 Responda:
 - theme: o tema central em poucas palavras (em português).
-- format: o tipo de vídeo/formato (ex.: "documentário narrado de desmontagem", "lista de curiosidades", "história narrada").
-- angle: o ângulo/gancho que faz o vídeo funcionar (ex.: "rivalidade entre países + revelação técnica").
-- topic: 1 a 2 frases em português descrevendo exatamente que tipo de vídeo conta como concorrente direto
-  (tema + formato + ângulo). Isso vai ser usado para julgar se outros vídeos são relevantes.
-- queries: 6 buscas curtas (2 a 6 palavras) NO IDIOMA DO VÍDEO, como um pesquisador digitaria para achar
-  concorrentes diretos (tema central, subtemas, termos do público). Sem nome de canal.
-- variants: 8 títulos-variação NO IDIOMA DO VÍDEO que mantêm a estrutura e o ângulo do título original mas trocam
-  os detalhes (países, marcas, objetos, pessoas, números), como outros canais do mesmo nicho fariam.
+- format: o formato do vídeo (ex.: "documentário narrado de desmontagem", "lista de curiosidades", "história narrada").
+- angle: a PREMISSA que faz o vídeo funcionar, o que se repete nos modelados (ex.: "engenheiros de um país desmontam
+  um produto do país rival e revelam o que há dentro").
+- topic: 1 a 2 frases em português dizendo exatamente que vídeo conta como concorrente direto (tema + formato +
+  premissa). É o critério do filtro de relevância: inclua as variações da premissa, exclua o que só divide o tema.
+- queries: 6 buscas curtas (2 a 6 palavras) NO IDIOMA DO VÍDEO, como o público digita: 2 da premissa, 2 do tema
+  central e 2 com termos populares do nicho. Sem nome de canal, sem aspas.
+- variants: 8 títulos-variação NO IDIOMA DO VÍDEO que mantêm a estrutura e a premissa do original mas trocam os
+  detalhes, variando os eixos (quem faz, o objeto, o país/marca rival, o número, a época), como os canais que
+  modelam esse vídeo fariam. Pelo menos 2 devem inverter os papéis (quem desmonta vira quem é desmontado).
   Ex.: "American Engineers Tore Down a Chinese Tractor - What They Found Inside" ->
   "Japanese Engineers Tore Down an American Tractor", "German Engineers Took Apart a Chinese Excavator",
   "Engineers Tore Down a Chinese Electric Car - What They Found Inside"."""
@@ -584,14 +632,23 @@ def seed_profile(video_id: str, title: str, channel: str, description: str, tags
 # Juiz de relevância: separa o que tem a ver do que é ruído (Haiku, em lotes)
 # ---------------------------------------------------------------------------
 
-_JUDGE_SYSTEM = """Você filtra resultados de uma pesquisa de mercado no YouTube. Recebe a descrição do que o editor
-procura e uma lista numerada de vídeos (número | título, em qualquer idioma). Dê uma nota de relevância:
-3 = concorrente direto: mesmo tema central E mesmo formato/ângulo (dá para modelar)
-2 = mesmo tema central, formato ou ângulo diferente
-1 = mesma área ampla, mas outro tema
-0 = nada a ver (não liste)
-O idioma do título não importa. Seja rigoroso: na dúvida entre duas notas, use a menor.
-Liste SOMENTE os vídeos com nota 1, 2 ou 3: n = número do vídeo, r = nota."""
+_JUDGE_SYSTEM = """Você é o filtro de qualidade de uma pesquisa de mercado de canais dark do YouTube. Recebe o que o
+editor procura e uma lista numerada de vídeos (n | título | canal | duração em minutos), em qualquer idioma.
+
+Nota de relevância:
+3 = concorrente direto: mesmo tema E mesma premissa/formato. Um canal dark refaria este vídeo trocando só os detalhes
+    (país, marca, objeto, personagem, número).
+2 = mesmo tema, outra premissa ou formato (serve de referência para o mesmo público).
+1 = mesma área ampla, outro tema (o público até assiste, mas não é o que se procura).
+0 = nada a ver: não liste.
+
+Regras:
+- Julgue o assunto e a premissa, nunca o idioma: o mesmo vídeo em japonês ou hindi vale igual.
+- Canal de pessoa do mesmo tema (react, vlog, podcast, cortes, gameplay, opinião, telejornal): no máximo 2.
+- Música, playlist, clipe, trailer, teaser, live, vídeo de 1 minuto ou menos: 0.
+- Título isca sem relação clara com o tema: 0.
+- Na dúvida entre duas notas, use a menor.
+Liste SOMENTE os vídeos com nota 1, 2 ou 3: n = número, r = nota."""
 
 
 class Relevance(BaseModel):
@@ -633,6 +690,72 @@ def malandro_titles(video_id: str, title: str, topic: str, langs: list[str]) -> 
     return {i["lang"]: {"title": i["title"], "query": i["query"]} for i in res["items"] if i["lang"] in LANGUAGES}
 
 
+# Malandro + países: onde há PROCURA por esse conteúdo e ninguém faz (termos curtos por idioma + leitura final)
+
+_TERMS_SYSTEM = """Você ajuda a medir em que países existe PROCURA por um tipo de vídeo no YouTube. Para cada idioma
+pedido, escreva 3 termos MUITO CURTOS (1 ou 2 palavras), como o COMEÇO de uma busca que muita gente digita no YouTube
+daquele país (o autocompletar só funciona com termos populares). TODO termo começa pelo NOME ESPECÍFICO do assunto
+(o grupo, o objeto, o lugar, a marca: "menonitas", "amish", "trator chinês"), nunca por verbo ou palavra genérica
+("abandono", "análise", "comparação", "história"), que puxam qualquer coisa: 1) o assunto principal (ex.: "menonitas"),
+2) o assunto + o detalhe que mais importa no vídeo (ex.: "menonitas méxico"), 3) o assunto vizinho que o mesmo público
+busca (ex.: "amish"). Evite palavras ambíguas (banda, time, novela). Use o código do idioma exatamente como recebido."""
+
+
+class LangTerms(BaseModel):
+    lang: str
+    terms: list[str]
+
+
+class LangTermsList(BaseModel):
+    items: list[LangTerms]
+
+
+def country_terms(video_id: str, title: str, topic: str, langs: list[str]) -> dict[str, list[str]]:
+    user = (f"Vídeo: {title}\nTema: {topic}\n\nIdiomas: " + ", ".join(f"{l} ({LANGUAGES[l][2]})" for l in langs))
+    res = _run("paises-termos:v3", f"video:{video_id}", config.AI_MODEL_FAST, _TERMS_SYSTEM, user, LangTermsList,
+               max_tokens=40 * len(langs) + 200)
+    return {i["lang"]: [t.strip() for t in i["terms"] if t.strip()][:3] for i in res["items"] if i["lang"] in LANGUAGES}
+
+
+_COUNTRIES_SYSTEM = """Você é analista de mercado internacional de canais dark do YouTube. O editor rodou o Método
+Malandro neste vídeo (em que línguas ninguém fez) e agora quer saber EM QUE PAÍSES o público PROCURA esse conteúdo e
+ainda não tem quem faça.
+
+Você recebe uma tabela por MERCADO (um idioma com os seus países) com dados reais: procura (quantas buscas o YouTube
+de cada país completa para os termos do tema, quantos vídeos do tema NAQUELE IDIOMA postados no último mês ganharam
+tração, views por hora típicas) e oferta (quantos canais já fizeram ESTE vídeo nesse idioma), com a nota de oportunidade
+já calculada; e comentários do vídeo original. O autocompletar mostra no máximo 10 sugestões por termo (30 = teto).
+
+Regras: use só os dados e cite os números em linguagem simples (vídeos do nicho ganhando views, views por hora,
+quantos canais já fizeram, o que se busca); NUNCA cite a nota 0-1 nem "procura de 0,xx"; nada genérico; procura alta com oferta zero é o melhor sinal; procura baixa
+é procura baixa (não invente interesse; não chame de oportunidade). O idioma do original não é oportunidade. Oferta: "livre" = ninguém fez, "pouca" = 1 ou 2 canais fizeram, "saturada" = 3
+ou mais; use exatamente esses termos (não chame "pouca" de saturada). Português do Brasil, frases curtas, o editor não é técnico.
+- summary: 2 a 3 frases: onde está a melhor oportunidade e por quê, com números.
+- notes: para cada mercado em "Analise estes": c = o código do idioma exatamente como veio; why = uma frase com o
+  motivo (procura x oferta, com números) e o país que puxa a procura; adapt = uma frase do que adaptar para o vídeo
+  soar nativo no país principal (moeda, unidades, marcas, rival local, referências culturais).
+- comment_signals: uma frase sobre países ou idiomas que APARECEM ESCRITOS nos comentários do original ("saludos desde",
+  pedidos de tradução, comentários em outra língua). Só o que está lá, sem deduzir interesse. Sem sinais, diga isso."""
+
+
+class CountryNote(BaseModel):
+    c: str
+    why: str
+    adapt: str
+
+
+class CountryReport(BaseModel):
+    summary: str
+    notes: list[CountryNote]
+    comment_signals: str
+
+
+def countries_report(video_id: str, text: str, refresh: bool = True) -> dict:
+    target = f"video:{video_id}:" + hashlib.sha1(text.encode()).hexdigest()[:12]
+    return _run("paises:v3", target, config.AI_MODEL_FAST, _COUNTRIES_SYSTEM, text, CountryReport,
+                max_tokens=2500, refresh=refresh)
+
+
 _SAME_VIDEO_SYSTEM = """Você verifica se um vídeo já foi "modelado" (refeito por outros canais) em outras línguas.
 Recebe o vídeo de referência e uma lista numerada de títulos de vídeos (de vários países). Para cada título dê:
 r = 3 se é o MESMO vídeo modelado (mesma premissa e ângulo, só mudando detalhes ou idioma);
@@ -670,14 +793,19 @@ def judge_same_video(reference: str, items: list[tuple[str, str]], batch: int = 
     return out
 
 
-def judge_relevance(topic: str, items: list[tuple[str, str]], batch: int = 100) -> dict[str, int]:
-    """items: [(video_id, título)]. Devolve {video_id: nota}; quem não aparece tem nota 0."""
+def judge_relevance(topic: str, items: list[tuple], batch: int = 100) -> dict[str, int]:
+    """items: [(video_id, título)] ou [(video_id, título, "canal | duração")]. Devolve {video_id: nota};
+    quem não aparece tem nota 0."""
     system = _JUDGE_SYSTEM + "\n\nO editor procura: " + topic
 
+    def line(i, it):
+        extra = f" | {it[2]}" if len(it) > 2 and it[2] else ""
+        return f"{i} | {' '.join((it[1] or '').split())[:90]}{extra}"
+
     def one(part):
-        user = "\n".join(f"{i} | {' '.join((t or '').split())[:120]}" for i, (_vid, t) in enumerate(part, 1))
+        user = "\n".join(line(i, it) for i, it in enumerate(part, 1))
         target = hashlib.sha1((system + user).encode()).hexdigest()[:20]
-        res = _run("rel:v2", target, config.AI_MODEL_FAST, system, user, RelevanceList,
+        res = _run("rel:v3", target, config.AI_MODEL_FAST, system, user, RelevanceList,
                    max_tokens=20 * len(part) + 200)  # teto para todos passarem; só se paga o que a IA escreve
         return {part[x["n"] - 1][0]: max(0, min(3, x["r"])) for x in res["items"] if 1 <= x["n"] <= len(part)}
 
@@ -693,21 +821,31 @@ def judge_relevance(topic: str, items: list[tuple[str, str]], batch: int = 100) 
 # Análise de um vídeo (Sonnet, com a thumbnail)
 # ---------------------------------------------------------------------------
 
-VIDEO_KIND = "analysis:v1"
+VIDEO_KIND = "analysis:v2"   # v2: sem títulos inventados
 
-_VIDEO_SYSTEM = """Você é um estrategista de canais dark do YouTube. Analise um vídeo que um editor está considerando
-modelar: o que fez ele funcionar e como replicar. Use só os dados recebidos (números, título, descrição, thumbnail e
-comentários). Seja concreto, profissional e direto. Explicações em português do Brasil."""
+_VIDEO_SYSTEM = """Você é um estrategista sênior de canais dark do YouTube (sem rosto: narração com voz de IA ou locutor
+sobre imagens de IA, banco de vídeos ou animação). Um editor está decidindo se MODELA este vídeo: refazer a mesma
+premissa e estrutura, trocando os detalhes, num canal dark. Analise o que fez ele funcionar e como replicar.
+
+Regras:
+- Use só os dados recebidos (números, título, descrição, thumbnail e comentários). Não invente números nem fatos.
+- Toda afirmação forte vem com o dado que a sustenta (ex.: "1,4 mil views por hora com 4 dias de vida").
+- Views por hora = o que está explodindo agora; viralizou (views ÷ inscritos) alto = o algoritmo levou o vídeo para
+  fora da base do canal. Canal pequeno ou novo com vídeo explodindo = premissa forte, não fama do canal.
+- Nada de conselho genérico ("faça uma thumbnail chamativa", "capriche no roteiro"): diga O QUE exatamente.
+- Nunca invente títulos: o editor modela o vídeo real.
+- Português do Brasil, direto, frases curtas."""
 
 _VIDEO_TASK = """Responda:
-- verdict: uma frase: vale modelar? por quê?
-- why_it_worked: 3 a 5 motivos concretos (tema, ângulo, título, thumbnail, timing, formato, duração).
-- title_breakdown: como o título funciona (gatilhos, estrutura, palavras-chave).
-- thumbnail: o que a thumbnail faz (composição, texto, cores, emoção) e como replicar.
-- audience: o que os comentários mostram sobre o público (o que gostou, o que pediu, dúvidas).
-- how_to_model: 4 a 6 passos práticos para fazer um vídeo modelado nesse (o que manter, o que mudar, como se diferenciar).
-- titles: 5 títulos modelados prontos, no idioma {lang}.
-- risks: 1 a 3 riscos (saturação, direitos, tema datado)."""
+- verdict: uma frase: vale modelar agora? Sim/não e o motivo com o número que decide.
+- why_it_worked: 3 a 5 motivos concretos (premissa, ângulo, título, thumbnail, timing, formato, duração), cada um com
+  a evidência.
+- title_breakdown: a estrutura do título (gatilho, promessa, curiosidade aberta, palavras que puxam) e o que manter.
+- thumbnail: composição, texto, cores, emoção e o elemento que prende o olho; o que copiar e o que trocar.
+- audience: o que os comentários mostram (o que emocionou, o que pediram, dúvidas, críticas). Sem comentários, diga isso.
+- how_to_model: 4 a 6 passos práticos para um editor que publica em {lang}: o que MANTER (premissa, estrutura, ritmo,
+  duração), o que TROCAR (detalhes, país, objeto) e como se diferenciar sem perder o que funcionou.
+- risks: 1 a 3 riscos concretos (saturação, direitos de imagem/marca, tema que perde a validade rápido)."""
 
 
 class VideoAnalysis(BaseModel):
@@ -717,7 +855,6 @@ class VideoAnalysis(BaseModel):
     thumbnail: str
     audience: str
     how_to_model: list[str]
-    titles: list[str]
     risks: list[str]
 
 
@@ -730,92 +867,55 @@ def analyze_video(video_id: str, text: str, lang: str, refresh: bool = False) ->
                 max_tokens=8000, refresh=refresh, effort="low", timeout=180)
 
 
-# ---------------------------------------------------------------------------
-# Ideias de variações do título, com chance de viralizar (Sonnet)
-# ---------------------------------------------------------------------------
-
-VARIATIONS_KIND = "variations:v1"
-
-_VARIATIONS_SYSTEM = """Você é estrategista de canais dark do YouTube. O editor quer fazer VARIAÇÕES de um vídeo que
-viralizou: o mesmo formato, trocando os detalhes (quem faz, o objeto, o país, a marca, o número...).
-Ex.: "Engenheiros Japoneses Desmontaram um Carro Chinês" -> "Engenheiros Alemães Desmontaram um Carro Japonês",
-"Engenheiros Americanos Desmontaram um Trator Chinês".
-
-Use os DADOS recebidos (vídeos parecidos com números reais, idiomas onde já foi feito, comentários do público) para
-estimar a chance de cada variação viralizar para o público desse nicho:
-- sobe a chance: combinação parecida com outras que viralizaram recentemente; rivalidade ou comparação que o público
-  ama (países, marcas famosas, "barato x caro"); algo que o público pediu nos comentários; poucos canais fizeram.
-- desce a chance: combinação que muitos canais já fizeram (saturada); troca sem graça ou sem lógica; tema que não é do
-  interesse desse público.
-- seja honesto: sem dados que sustentem, não passe de 60%.
-Explicações curtas em português do Brasil, simples (o editor não é técnico)."""
-
-_VARIATIONS_TASK = """Responda:
-- fits: true se o título dá para variar trocando detalhes; false se não dá (ex.: é sobre um fato único).
-- template: o "molde" do título, com as partes trocáveis entre [colchetes], no idioma {lang}.
-- note: uma frase: como usar essas variações (ou, se não dá para variar, que outros ângulos funcionam).
-- variations: 10 títulos prontos no idioma {lang}, do mais provável para o menos provável de viralizar. Para cada um:
-  title (o título completo), changes (o que foi trocado, curto), chance (0 a 100: chance de viralizar),
-  why (uma frase simples com o motivo, citando o dado que sustenta quando houver)."""
-
-
-class Variation(BaseModel):
-    title: str
-    changes: str
-    chance: int
-    why: str
-
-
-class Variations(BaseModel):
-    fits: bool
-    template: str
-    note: str
-    variations: list[Variation]
-
-
-def title_variations(video_id: str, payload: str, lang: str, refresh: bool = False) -> dict:
-    res = _run(VARIATIONS_KIND, f"video:{video_id}", config.AI_MODEL_SMART, _VARIATIONS_SYSTEM,
-               payload + "\n\n" + _VARIATIONS_TASK.format(lang=lang), Variations,
-               max_tokens=6000, refresh=refresh, effort="low", timeout=180)
-    res["variations"] = sorted(res["variations"], key=lambda v: -v["chance"])
-    return res
 
 
 # ---------------------------------------------------------------------------
 # Relatório da pesquisa de mercado (Sonnet)
 # ---------------------------------------------------------------------------
 
-REPORT_KIND = "report:v1"
+REPORT_KIND = "report:v3"   # v3: régua dos parâmetros de viral, brechas e evidência obrigatória
+_OLD_REPORT_KINDS = ("report:v2",)   # relatórios antigos continuam aparecendo (sem as brechas)
 
-_REPORT_SYSTEM = """Você é um analista sênior de mercado para canais dark do YouTube (sem rosto: narração com IA ou
-locutor sobre imagens, IA, banco de vídeos, animação ou compilação). Um editor vai usar seu relatório para decidir o
-PRÓXIMO VÍDEO A MODELAR, então ele precisa ser concreto, acionável e fiel aos dados.
+_REPORT_SYSTEM = """Você é um analista sênior de mercado de canais dark do YouTube (sem rosto: narração com voz de IA ou
+locutor sobre imagens de IA, banco de vídeos, animação ou compilação). O editor usa o seu relatório como VERDADE para
+decidir o próximo vídeo a modelar: ele precisa ser fiel aos dados, específico e acionável, no nível de uma consultoria.
 
-Você recebe: os vídeos encontrados na pesquisa (com números reais), os padrões de título dos que mais furaram a bolha
-e comentários reais do público nos vídeos principais.
+Você recebe: a régua de viral do editor, os vídeos da pesquisa que batem essa régua (números reais), os padrões de
+título dos que mais viralizaram e comentários reais do público.
+
+Como ler os números:
+- Views por hora (desde a postagem) = o que está explodindo AGORA. É o critério principal do editor.
+- Viralizou = views ÷ inscritos do canal. Alto = o algoritmo levou o vídeo para fora da base do canal (premissa forte,
+  não fama do canal). Canal pequeno ou novo explodindo = espaço para entrar.
+- Relevância 3 = concorrente direto (mesma premissa), 2 = mesmo tema.
+- Vários canais diferentes acertando a mesma premissa na mesma semana = demanda comprovada; um único vídeo isolado =
+  sinal fraco (diga isso).
 
 Regras:
-- Baseie tudo nos dados. Cite os vídeos pelo ID entre colchetes, ex.: [dQw4w9WgXcQ]. Não invente números.
-- Multiplicador = views / inscritos do canal. Alto = furou a bolha (o algoritmo empurrou para fora da base do canal).
-- Recência importa muito: vídeo recente que furou a bolha indica demanda ATUAL. Priorize o que tem até 30 a 90 dias.
-- Canais pequenos ou novos com vídeos explodindo = espaço para entrar no nicho.
-- Nos comentários, procure pedidos explícitos ("faz um sobre...", "parte 2"), perguntas, dúvidas e o que emocionou.
-- As ideias devem ser modeláveis por um canal dark (mesmo formato dos que funcionaram), no idioma dos vídeos do nicho.
-- Vídeos de outros idiomas são referência para ADAPTAR (não traduzir ao pé da letra) para o público do canal.
-- Explicações em português do Brasil. Direto, sem enrolação."""
+- Toda afirmação vem com evidência: o ID entre colchetes (ex.: [dQw4w9WgXcQ]) e o número que sustenta. Não invente
+  números, vídeos nem comentários.
+- Nada de conselho genérico ("capriche na thumbnail", "poste com frequência"): só o que ESTES dados mostram.
+- Nos comentários, procure pedidos explícitos ("faz um sobre...", "parte 2"), perguntas sem resposta, o que emocionou
+  e críticas (o que o público sente falta).
+- NUNCA invente títulos: o editor só modela vídeos que EXISTEM e já provaram.
+- Vídeos de outros idiomas são para ADAPTAR ao público do canal (premissa e estrutura), não traduzir ao pé da letra.
+- Português do Brasil, frases curtas, sem enrolação. O editor não é técnico."""
 
 _REPORT_TASK = """Monte o relatório:
-- summary: diagnóstico do nicho em 3 a 5 frases (o que o público quer agora, quem está crescendo, onde está a brecha).
-- saturation e opportunity: sua leitura do nicho.
-- what_works: 4 a 7 padrões concretos (tema, formato, duração, ângulo, estrutura de título), cada um com IDs de exemplo.
-- title_formulas: 4 a 6 fórmulas de título com lacunas, ex.: "[NÚMERO] [COISA] que [AUTORIDADE] não consegue explicar".
-- audience_requests: 3 a 8 pedidos do público, com a evidência (trecho do comentário) e a força do sinal.
-- to_model: os 5 melhores vídeos para modelar agora (IDs), priorizando recentes que furaram a bolha.
-- ideas: 5 vídeos prontos para produzir: title (principal), alt_titles (2), hook (primeiros 15 a 30 segundos de
-  narração), structure (4 a 7 blocos do roteiro), description (descrição pronta para o YouTube, 2 a 4 frases e uma
-  chamada), tags (6 a 10), based_on (IDs de referência), why_now (por que esse vídeo agora).
-- keywords: 8 a 15 palavras-chave e buscas do nicho, para as próximas pesquisas e para SEO.
-- avoid: 2 a 5 coisas que não estão funcionando ou que saturaram."""
+- summary: diagnóstico em 3 a 5 frases: o que o público quer AGORA, quem está crescendo (canais pequenos/novos?), qual
+  premissa está quente e onde está a brecha. Com IDs e números.
+- saturation e opportunity: sua leitura (baixa, media, alta), coerente com o summary.
+- what_works: 4 a 7 padrões concretos (premissa, formato, duração, estrutura de título, thumbnail se der para inferir),
+  cada um com 2 ou mais IDs de exemplo e o número que prova.
+- gaps: 2 a 5 brechas: o que o público pede ou que está crescendo e quase ninguém entregou ainda (subtema, idioma,
+  ângulo). Cada uma com a evidência (ID, comentário ou contagem).
+- audience_requests: 3 a 8 pedidos do público, com a evidência (trecho real do comentário) e a força do sinal
+  (forte = vários comentários/muitas curtidas; fraca = um comentário isolado).
+- to_model: os 8 melhores vídeos para modelar AGORA (IDs da tabela), do mais forte para o mais fraco. Priorize views
+  por hora, depois concorrente direto (relevância 3), canal dark e canal pequeno (mais fácil de replicar). Em why,
+  uma frase com o número (views por hora, idade) e o que modelar nele.
+- keywords: 8 a 15 buscas e palavras-chave do nicho, como o público digita (para as próximas pesquisas e SEO).
+- avoid: 2 a 5 coisas que não funcionam ou saturaram, com evidência."""
 
 
 class VideoRef(BaseModel):
@@ -829,33 +929,29 @@ class AudienceRequest(BaseModel):
     strength: Literal["forte", "media", "fraca"]
 
 
-class Idea(BaseModel):
-    title: str
-    alt_titles: list[str]
-    hook: str
-    structure: list[str]
-    description: str
-    tags: list[str]
-    based_on: list[str]
-    why_now: str
-
-
 class Report(BaseModel):
     summary: str
     saturation: Literal["baixa", "media", "alta"]
     opportunity: Literal["baixa", "media", "alta"]
     what_works: list[str]
-    title_formulas: list[str]
+    gaps: list[str]
     audience_requests: list[AudienceRequest]
     to_model: list[VideoRef]
-    ideas: list[Idea]
     keywords: list[str]
     avoid: list[str]
 
 
+def report_cached(research_id: int) -> tuple[dict | None, str]:
+    """(relatório, kind em que está guardado): o atual ou, se não houver, o da versão anterior."""
+    for kind in (REPORT_KIND, *_OLD_REPORT_KINDS):
+        rep = cached(kind, f"research:{research_id}")
+        if rep:
+            return rep, kind
+    return None, REPORT_KIND
+
+
 def research_report(research_id: int, payload: str, lang: str, refresh: bool = False) -> dict:
-    task = _REPORT_TASK + f"\n\nIdioma do canal do editor: {lang}. Escreva title_formulas, ideas (título, " \
-        f"alternativos, gancho, estrutura, descrição, tags) e keywords em {lang}."
+    task = _REPORT_TASK + f"\n\nIdioma do canal do editor: {lang}. Escreva as keywords em {lang}."
     return _run(REPORT_KIND, f"research:{research_id}", config.AI_MODEL_SMART, _REPORT_SYSTEM,
                 payload + "\n\n" + task, Report, max_tokens=16000, refresh=refresh, effort="medium",
                 timeout=300)

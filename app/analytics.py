@@ -8,7 +8,7 @@
 """
 from datetime import datetime, timezone
 
-from . import config, db
+from . import config, db, viral
 
 
 def _age_days(ts: str | None) -> float | None:
@@ -22,15 +22,17 @@ def _age_days(ts: str | None) -> float | None:
 
 
 def _growth() -> dict[str, float]:
-    """Views/dia entre as duas últimas medições de cada vídeo."""
+    """Ritmo AGORA: views por hora entre as duas últimas medições de cada vídeo (comparar com a média desde a
+    postagem diz se o vídeo está acelerando). Usa as horas reais entre as medições: _age_days arredonda o que tem
+    menos de 6 horas e inflava a conta."""
     out = {}
     last: dict[str, tuple] = {}
     for r in db.rows("SELECT video_id, captured_at, views FROM video_stats ORDER BY video_id, captured_at"):
         prev = last.get(r["video_id"])
-        if prev:
-            d1, d2 = _age_days(prev[0]), _age_days(r["captured_at"])
-            if d1 is not None and d2 is not None and d1 - d2 >= 0.04:  # ~1h entre medições
-                out[r["video_id"]] = (r["views"] - prev[1]) / (d1 - d2)
+        if prev and r["views"] is not None and prev[1] is not None:
+            h1, h2 = viral.hours_since(prev[0]), viral.hours_since(r["captured_at"])
+            if h1 is not None and h2 is not None and h1 - h2 >= 1:   # pelo menos 1 hora entre as medições
+                out[r["video_id"]] = max(r["views"] - prev[1], 0) / (h1 - h2)
         last[r["video_id"]] = (r["captured_at"], r["views"])
     return out
 
@@ -69,11 +71,12 @@ def _decorate(data: list[dict]) -> list[dict]:
         v["multiplier"] = (
             round(v["views"] / max(v["subs"], 100), 2) if v["views"] is not None and v["subs"] is not None else None
         )
-        v["growth_day"] = round(growth[v["video_id"]]) if v["video_id"] in growth else None
+        v["growth_hour"] = round(growth[v["video_id"]]) if v["video_id"] in growth else None
         v["engagement"] = (
             round(100 * ((v["likes"] or 0) + (v["comments"] or 0)) / v["views"], 2) if v["views"] else None
         )
         v["is_dark"] = is_dark(v)
+        viral.add_metrics(v)   # age_hours e views_hour (views por hora: o "agora")
     return data
 
 
@@ -175,12 +178,12 @@ def saturation(videos: list[dict], min_relevance: int = 3) -> list[dict]:
 
 
 def opportunity(v: dict) -> float | None:
-    """Quanto vale modelar: furou a bolha (multiplicador) e é recente (quanto mais novo, mais chance)."""
-    if v.get("multiplier") is None:
+    """Força agora, pela régua do editor (Configurações → Meus parâmetros): por padrão views por hora."""
+    if v.get("views") is None:
         return None
-    age = v.get("age_days") or 9999
-    recency = 1.0 if age <= 30 else 0.7 if age <= 90 else 0.4 if age <= 365 else 0.15
-    return round(v["multiplier"] * recency, 2)
+    if v.get("views_hour") is None and v.get("published_at"):
+        viral.add_metrics(v)
+    return round(viral.rank_value(v), 2)
 
 
 def channels(profile_id: int | None = None) -> list[dict]:
